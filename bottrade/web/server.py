@@ -74,12 +74,21 @@ def build_snapshot(db_path: str | Path, cfg: Config | None = None,
         equity_rows = _rows(conn, "SELECT ts, equity, cash, exposure, realized_pnl, "
                                   "unrealized_pnl FROM equity ORDER BY id")
         tick_row = _one(conn, "SELECT * FROM ticks ORDER BY id DESC LIMIT 1")
-        # exactly one tick's snapshot: several ticks can share a wall-clock second
+        tick_no = int(tick_row["tick_no"]) if tick_row else 0
+        n_open = int(tick_row["open_positions"] or 0) if tick_row else 0
+        # One tick's positions, not a pile of duplicates and not the previous
+        # run's. Positions are written as one contiguous batch per tick, and a
+        # restarted bot re-uses the same tick numbers (it counts from 1 again),
+        # so `WHERE tick = 12` would also return the old run's tick 12. The
+        # newest batch is the last `open_positions` rows of the newest tick —
+        # no run id, no schema migration.
         position_rows = _rows(
             conn,
-            "SELECT * FROM positions WHERE tick = (SELECT MAX(tick) FROM positions) "
-            "ORDER BY market_value DESC",
-        )
+            "SELECT * FROM positions WHERE tick = ? ORDER BY id DESC LIMIT ?",
+            (tick_no, n_open),
+        ) if n_open > 0 else []
+        # id order is a batch artefact; the display wants the big ones first
+        position_rows.sort(key=lambda r: r.get("market_value") or 0.0, reverse=True)
         fill_rows = _rows(conn, "SELECT * FROM fills ORDER BY id DESC LIMIT 40")
         signal_rows = _rows(conn, "SELECT * FROM signals ORDER BY id DESC LIMIT 24")
         rejection_rows = _rows(conn, "SELECT reason FROM rejections LIMIT 20000")
@@ -95,7 +104,8 @@ def build_snapshot(db_path: str | Path, cfg: Config | None = None,
         health_rows = _rows(
             conn,
             "SELECT venue, ok, miss, stale_hours, note FROM health "
-            "WHERE tick = (SELECT MAX(tick) FROM health) ORDER BY venue",
+            "WHERE id IN (SELECT MAX(id) FROM health GROUP BY venue) "
+            "ORDER BY venue",
         )
         totals = _one(
             conn,
@@ -196,9 +206,9 @@ def _group_rejections(rows: list[dict[str, Any]], limit: int = 9) -> list[dict[s
     return [{"reason": key, "n": n} for key, n in ranked]
 
 
-def _rows(conn: sqlite3.Connection, sql: str) -> list[dict[str, Any]]:
+def _rows(conn: sqlite3.Connection, sql: str, params: Any = ()) -> list[dict[str, Any]]:
     try:
-        return [dict(r) for r in conn.execute(sql).fetchall()]
+        return [dict(r) for r in conn.execute(sql, params).fetchall()]
     except sqlite3.Error:
         return []
 
