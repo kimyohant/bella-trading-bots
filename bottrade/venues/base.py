@@ -34,6 +34,16 @@ class VenueAdapter(ABC):
         """
         return []
 
+    async def quote_missing(self, keys: list[str]) -> dict[str, float]:
+        """Best-effort prices for positions outside the scanned universe.
+
+        A position that drops out of the scan quota stops being marked, and an
+        unmarked position freezes its P&L and can never exit honestly. Asking the
+        venue for those specific keys costs one call and keeps the mark real.
+        Return {market_key: price}; an empty dict means "cannot price".
+        """
+        return {}
+
     async def close(self) -> None:
         """Release any resources. Default: nothing to do."""
 

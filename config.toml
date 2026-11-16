@@ -97,6 +97,11 @@ pumpfun_max_age_minutes = 720
 pumpfun_include_complete = false
 pumpfun_spread_bps = 200
 pumpfun_sol_price_fallback = 150.0
+# GeckoTerminal rate-limits by IP; when it refuses us the venue falls back to
+# DexScreener, which only indexes tokens that already have a DEX pair. Those
+# count as "graduated", so this relaxes that one filter for that one source —
+# otherwise the fallback yields ~1 candidate and the venue looks dead.
+pumpfun_fallback_allow_graduated = true
 
 # 15-minute crypto markets are a different size of business: ~$1k of liquidity is
 # normal, and a 1c spread on a 50c contract is tight, not wide.

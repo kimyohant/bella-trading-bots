@@ -305,7 +305,7 @@ implement 3 method ใน `bottrade/venues/base.py::VenueAdapter` (`list_markets
 |---|---|---|
 | Polymarket | Gamma API (ตลาด/ราคา), CLOB `/book` (order book), Data API `/trades` (tape) | สาธารณะ ไม่ต้อง key |
 | pump.fun | **GeckoTerminal** `networks/solana/dexes/pump-fun/pools` (ราคา, FDV, reserve, taker counts, %change) | สาธารณะ ไม่ต้อง key |
-| pump.fun (สำรอง) | `frontend-api-v3.pump.fun` → Dexscreener | endpoint หน้าเว็บถูก Cloudflare บล็อกจากหลาย IP |
+| pump.fun (สำรอง) | `frontend-api-v3.pump.fun` → **DexScreener** (`token-profiles` + `token-boosts` → `tokens/v1` batch) | endpoint หน้าเว็บถูก Cloudflare บล็อกจากหลาย IP; DexScreener เป็นคนละ host จึงรอดตอน Gecko 429 |
 | spot (15m) | **Coinbase** `/ticker` + `/candles` (สำรอง Binance) | ใช้แทน Chainlink TWAP ที่ subscribe ไม่ได้ |
 
 จุดที่ต้องรู้ตรง ๆ:
@@ -317,6 +317,15 @@ implement 3 method ใน `bottrade/venues/base.py::VenueAdapter` (`list_markets
 - **แต่ในตลาด 15 นาที `bestBid/bestAsk` ของ Gamma ก็ล้าได้เหมือนกัน** — วัดได้ 0.56/0.57
   ขณะที่ CLOB จริงคือ 0.49/0.50 ซึ่งบนสัญญา 15 นาทีคือคนละโลก ตลาด crypto จึงอ่าน `/book` ตรง ๆ
 - endpoint ทั้งสองเจ้าเปลี่ยนได้ตลอด — โค้ดทุกจุด degrade เป็น list ว่าง ไม่ throw
+- **429 ไม่ใช่ความล้มเหลวชั่วคราว** — host ที่ตอบ 429/503 จะถูก park ไว้ `max(Retry-After, 5s)`
+  แล้ว tick ถัด ๆ ไป fail fast ทันที (0.00s) ไม่ยิงซ้ำ การ retry ตอนโดนจำกัดคือสิ่งที่ทำให้
+  โดนแบนยาว — ระหว่างนั้น source ถัดไปทำงานแทน
+- **DexScreener index แค่ token ที่มีคู่บน DEX แล้ว** — เกือบทั้งหมดจึงนับเป็น "graduated"
+  และจะถูกกรองทิ้ง ถ้าไม่ผ่อน `pumpfun_fallback_allow_graduated` (ผ่อนเฉพาะ source นี้)
+  ปล่อยไว้จะเหลือ ~1 ตัว แล้ว venue จะดู "ตาย" ทั้งที่แค่เปลี่ยน host
+- ทุกครั้งที่ source เปลี่ยน จะมี log บอก — `primary source down — served by dexscreener`
+  (WARN) / `every source failed` (WARN) / `source recovered` (INFO) ครั้งเดียวต่อการเปลี่ยน
+  ไม่ใช่ทุก tick เพราะ "fallback เงียบ ๆ" กับ "venue ว่างจริง" แยกกันไม่ออกด้วยตา
 
 ---
 
@@ -344,6 +353,7 @@ implement 3 method ใน `bottrade/venues/base.py::VenueAdapter` (`list_markets
 | health | `guard.max_empty_ticks` | `5` | ไม่มีข้อมูลเลยกี่ tick ถึง halt |
 | health | `guard.stale_action` | `hold` | ไม่ยอม fill ด้วยราคาค้าง |
 | exit | `risk.dead_mark_minutes` | `15` | token ที่ venue ไม่ quote แล้ว = delisted |
+| data | `scanner.pumpfun_fallback_allow_graduated` | `true` | ผ่อน filter "graduated" เฉพาะ source DexScreener |
 | crypto | `crypto.basis_bps` | `4` | ต่ำกว่านี้คือ basis noise ไม่ใช่ edge |
 | crypto | `crypto.min_z` | `0.8` | สัญญาณต้องแรงพอ |
 | crypto | `crypto.min_seconds_left` | `300` | ต้องเหลือเวลาให้เข้าออก |
@@ -397,10 +407,11 @@ BOTTRADE__RISK__KELLY_FRACTION=0.15 BOTTRADE__SIGNAL__MIN_EDGE=0.08 python -m bo
 python -m unittest discover -s bottrade/tests -t . -v
 ```
 
-79 tests ครอบ: broker fills/fees/slippage/partial, Kelly sizing, ทุก hard gate, exits,
+98 tests ครอบ: broker fills/fees/slippage/partial, Kelly sizing, ทุก hard gate, exits,
 sentiment lexicon+negation, guard staleness + dead-man's switch + no-fabricated-fills,
 crypto fair value + basis gate + risk profile + spread/venue isolation จาก binary book,
 delisted-token write-off (vs. feed outage),
+429 host cooldown (fail-fast ไม่ยิงซ้ำ) + DexScreener fallback + การ re-mark โพซิชันที่หลุด quota,
 sqlite logging, report generation, backtest, monitor snapshot API
 
 ---
@@ -436,7 +447,7 @@ bottrade/
   venues/
     base.py               VenueAdapter interface
     polymarket.py         Gamma + CLOB + Data API
-    pumpfun.py            GeckoTerminal + frontend fallback
+    pumpfun.py            GeckoTerminal + frontend + DexScreener fallback
     paper.py              PaperBroker (slippage, fee, partial fill)
     mock.py               synthetic world
   agents/
@@ -445,7 +456,7 @@ bottrade/
     executor.py portfolio.py
     orchestrator.py       pipeline driver
   data/
-    http.py               async fetch + cache + retries (httpx ถ้ามี)
+    http.py               async fetch + cache + retries + 429 host cooldown
     spot.py               Coinbase/Binance spot + realized vol (15m markets)
     store.py              sqlite schema + writers
   web/

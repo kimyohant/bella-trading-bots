@@ -100,7 +100,8 @@ class ScannerAgent(Agent):
         ctx.state["universe_size"] = len(quota)
         ctx.state["dropped"] = dropped
 
-        ctx.broker.mark(ctx.price_map())
+        await self._mark_positions(ctx)
+
         if ctx.store:
             ctx.store.record_markets(quota)
 
@@ -108,6 +109,36 @@ class ScannerAgent(Agent):
             "universe=%d dropped=%s", len(quota),
             {k: v for k, v in dropped.items() if v},
         )
+
+    async def _mark_positions(self, ctx: Context) -> None:
+        """Mark every open position, including ones outside the scan quota.
+
+        `PaperBroker.mark` only touches keys it is given, so a position that
+        drops out of the universe used to keep its last price forever: P&L froze,
+        every exit rule read that frozen number, and the dashboard sat on a mark
+        nobody could trade. Ask the venue for the strays — one call per venue.
+        """
+        prices = ctx.price_map()
+        missing: dict[Venue, list[str]] = {}
+        for key in ctx.broker.positions:
+            if key in prices:
+                continue
+            try:
+                venue = Venue(key.split(":", 1)[0])
+            except ValueError:
+                continue
+            missing.setdefault(venue, []).append(key)
+
+        for venue, keys in missing.items():
+            adapter = ctx.adapters.get(venue)
+            if adapter is None:
+                continue
+            try:
+                prices.update(await adapter.quote_missing(keys))
+            except Exception:  # noqa: BLE001 - a stale mark must not kill the tick
+                self.log.debug("quote_missing failed for %s", venue.value)
+
+        ctx.broker.mark(prices)
 
 
 def _rank(market: Market) -> float:

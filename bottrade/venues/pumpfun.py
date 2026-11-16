@@ -8,7 +8,9 @@ behind Cloudflare, so this adapter uses a layered strategy:
      taker counts and multi-horizon price change. Free, no key, and it gives the
      whale agent real flow data for free.
   2. **pump.fun frontend API** — legacy fallback (works from some networks).
-  3. **Dexscreener** — last resort for a single mint's price/liquidity.
+  3. **DexScreener** — independent host, so it survives GeckoTerminal rate-limiting
+     us by IP: collect pump.fun mints from `token-profiles`/`token-boosts`, then
+     price them all in one batched `tokens/v1` request.
 
 Every layer degrades to an empty list instead of raising, because these are all
 unofficial endpoints that can disappear.
@@ -19,6 +21,7 @@ Helius) plus direct bonding-curve reads; the adapter interface stays identical.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from ..config import Config
@@ -33,12 +36,15 @@ FRONTEND_BASES = (
     "https://frontend-api.pump.fun",
 )
 DEXSCREENER = "https://api.dexscreener.com/latest/dex"
+DEXSCREENER_API = "https://api.dexscreener.com"
 SOL_MINT = "So11111111111111111111111111111111111111112"
 
 VIRTUAL_SOL_START = 30.0
 VIRTUAL_SOL_COMPLETE = 85.0
 LAMPORTS = 1e9
 TOKEN_DECIMALS = 1e6
+
+log = logging.getLogger("bottrade.pumpfun")
 
 
 class PumpFunVenue(VenueAdapter):
@@ -53,10 +59,19 @@ class PumpFunVenue(VenueAdapter):
         self.min_age = cfg.f("scanner.pumpfun_min_age_minutes", 3)
         self.max_age = cfg.f("scanner.pumpfun_max_age_minutes", 720)
         self.include_complete = cfg.b("scanner.pumpfun_include_complete", False)
+        # DexScreener only indexes tokens that already have a DEX pair, so
+        # essentially everything it returns has graduated off the bonding curve.
+        # Excluding those would leave the fallback with ~1 candidate and the
+        # venue looking dead again, so it is allowed by default — for that
+        # source only.
+        self.allow_graduated_fallback = cfg.b(
+            "scanner.pumpfun_fallback_allow_graduated", True
+        )
         self.spread_bps = cfg.f("scanner.pumpfun_spread_bps", 200)
         self.sol_fallback = cfg.f("scanner.pumpfun_sol_price_fallback", 150.0)
         self.pages = cfg.i("scanner.pumpfun_pages", 2)
         self.source = "none"
+        self._last_source: str | None = None
         self._sol_price: float | None = None
         self._flow: dict[str, dict[str, float]] = {}
 
@@ -69,10 +84,12 @@ class PumpFunVenue(VenueAdapter):
 
         markets: list[Market] = []
         for raw in pools:
-            parsed = (
-                self._parse_gecko(raw) if "attributes" in raw
-                else self._parse_coin(raw, sol_usd)
-            )
+            if "attributes" in raw:
+                parsed = self._parse_gecko(raw)
+            elif "baseToken" in raw:
+                parsed = self._parse_dexscreener(raw)
+            else:
+                parsed = self._parse_coin(raw, sol_usd)
             if parsed and self._passes_filters(parsed):
                 markets.append(parsed)
 
@@ -97,16 +114,41 @@ class PumpFunVenue(VenueAdapter):
     async def _fetch_pools(self) -> list[dict[str, Any]]:
         pools = await self._gecko_pools()
         if pools:
-            self.source = "geckoterminal"
+            self._note_source("geckoterminal")
             return pools
 
         coins = await self._frontend_coins()
         if coins:
-            self.source = "frontend-api"
+            self._note_source("frontend-api")
             return coins
 
-        self.source = "none"
+        pairs = await self._dexscreener_pools()
+        if pairs:
+            self._note_source("dexscreener")
+            return pairs
+
+        self._note_source("none")
         return []
+
+    def _note_source(self, source: str) -> None:
+        """Record which host served this tick, and say so when it changes.
+
+        A venue that has quietly fallen back to a thin source looks exactly like
+        a venue with nothing worth trading, and that ambiguity is what lets an
+        outage run for an hour before anyone notices. `_last_source` starts as
+        None so the very first healthy tick stays quiet, while a venue that is
+        dead from the start still says so.
+        """
+        previous, self._last_source = self._last_source, source
+        self.source = source
+        if source == previous:
+            return
+        if source == "none":
+            log.warning("every source failed — venue empty this tick")
+        elif source == "dexscreener":
+            log.warning("primary source down — served by dexscreener")
+        elif previous is not None:
+            log.info("source recovered: %s", source)
 
     async def _gecko_pools(self) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
@@ -125,6 +167,42 @@ class PumpFunVenue(VenueAdapter):
                 break
             out.extend(item for item in data if isinstance(item, dict))
         return out
+
+    async def _dexscreener_pools(self) -> list[dict[str, Any]]:
+        """Last resort, and a different host — which is the whole point.
+
+        GeckoTerminal rate-limits by IP, so when it is refusing us the bot used
+        to lose the entire venue and look "empty" rather than broken. DexScreener
+        is an independent API: collect pump.fun mints from the endpoints that
+        actually name them (recently profiled, recently boosted), then price all
+        of them in one batch request.
+        """
+        mints: list[str] = []
+        for path in ("token-profiles/latest/v1", "token-boosts/latest/v1"):
+            try:
+                rows = await fetch_json(f"{DEXSCREENER_API}/{path}", ttl=60, retries=0)
+            except HttpError:
+                continue
+            if not isinstance(rows, list):
+                continue
+            for row in rows:
+                if not isinstance(row, dict) or row.get("chainId") != "solana":
+                    continue
+                mint = str(row.get("tokenAddress") or "")
+                if mint.endswith("pump") and mint not in mints:
+                    mints.append(mint)
+        if not mints:
+            return []
+
+        try:
+            pairs = await fetch_json(
+                f"{DEXSCREENER_API}/tokens/v1/solana/{','.join(mints[:30])}",
+                ttl=20,
+                retries=0,
+            )
+        except HttpError:
+            return []
+        return [p for p in pairs if isinstance(p, dict)] if isinstance(pairs, list) else []
 
     async def _frontend_coins(self) -> list[dict[str, Any]]:
         params = {
@@ -205,6 +283,59 @@ class PumpFunVenue(VenueAdapter):
             },
         )
 
+    def _parse_dexscreener(self, pair: dict[str, Any]) -> Market | None:
+        """DexScreener pair shape (`/tokens/v1/solana/{mints}`)."""
+        base = pair.get("baseToken") or {}
+        mint = str(base.get("address") or "")
+        price = _num(pair.get("priceUsd"))
+        if not mint or price <= 0:
+            return None
+
+        created = pair.get("pairCreatedAt")
+        age_minutes = 0.0
+        if isinstance(created, (int, float)) and created > 0:
+            age_minutes = max(0.0, (utcnow().timestamp() - created / 1000.0) / 60.0)
+
+        symbol = str(base.get("symbol") or "").strip() or mint[:8]
+        liquidity = _num((pair.get("liquidity") or {}).get("usd"))
+        volume = _num((pair.get("volume") or {}).get("h24"))
+        changes = pair.get("priceChange") or {}
+        txns = (pair.get("txns") or {}).get("h24") or {}
+        mcap = _num(pair.get("marketCap")) or _num(pair.get("fdv"))
+
+        half = self.spread_bps / 10_000.0 / 2.0
+        return Market(
+            venue=self.venue,
+            market_id=mint,
+            question=symbol,
+            token_id=mint,
+            outcome="TOKEN",
+            price=price,
+            bid=price * (1.0 - half),
+            ask=price * (1.0 + half),
+            liquidity_usd=liquidity,
+            volume_24h_usd=volume,
+            end_date=None,
+            tags=("memecoin", "pumpfun"),
+            meta={
+                "symbol": symbol,
+                "age_minutes": round(age_minutes, 1),
+                "market_cap_usd": mcap,
+                "liquidity_usd": liquidity,
+                "buys_24h": _num(txns.get("buys")),
+                "sells_24h": _num(txns.get("sells")),
+                "buyers_24h": _num(txns.get("buyers")),
+                "change_m5": _num(changes.get("m5")),
+                "change_h1": _num(changes.get("h1")),
+                "change_h24": _num(changes.get("h24")),
+                # graduated tokens move to pumpswap; keep them out by default
+                "complete": str(pair.get("dexId") or "").lower()
+                not in ("pumpfun", "pump-fun"),
+                "pool": pair.get("pairAddress"),
+                "source": "dexscreener",
+            },
+        )
+
     def _parse_coin(self, coin: dict[str, Any], sol_usd: float) -> Market | None:
         """Legacy pump.fun frontend shape."""
         mint = str(coin.get("mint") or "")
@@ -261,7 +392,9 @@ class PumpFunVenue(VenueAdapter):
     def _passes_filters(self, market: Market) -> bool:
         meta = market.meta
         if meta.get("complete") and not self.include_complete:
-            return False
+            from_fallback = meta.get("source") == "dexscreener"
+            if not (from_fallback and self.allow_graduated_fallback):
+                return False
         if not (self.min_mcap <= meta.get("market_cap_usd", 0.0) <= self.max_mcap):
             return False
         age = meta.get("age_minutes", 0.0)
@@ -270,6 +403,32 @@ class PumpFunVenue(VenueAdapter):
         return True
 
     # ------------------------------------------------------------------- quotes
+    async def quote_missing(self, keys: list[str]) -> dict[str, float]:
+        """Price specific mints via DexScreener, one batched request."""
+        mints = [k.split(":", 1)[1] for k in keys if ":" in k][:30]
+        if not mints:
+            return {}
+        try:
+            pairs = await fetch_json(
+                f"{DEXSCREENER_API}/tokens/v1/solana/{','.join(mints)}",
+                ttl=15,
+                retries=0,
+            )
+        except HttpError:
+            return {}
+        if not isinstance(pairs, list):
+            return {}
+
+        out: dict[str, float] = {}
+        for pair in pairs:
+            if not isinstance(pair, dict):
+                continue
+            mint = str((pair.get("baseToken") or {}).get("address") or "")
+            price = _num(pair.get("priceUsd"))
+            if mint and price > 0:
+                out[f"{self.venue.value}:{mint}"] = price
+        return out
+
     async def get_quote(self, market: Market) -> Quote:
         """pump.fun trades against a bonding curve, so the "spread" is a model."""
         half = self.spread_bps / 10_000.0 / 2.0

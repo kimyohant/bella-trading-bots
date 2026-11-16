@@ -319,6 +319,20 @@ class PolymarketVenue(VenueAdapter):
         return True
 
     # ------------------------------------------------------------------- quotes
+    async def quote_missing(self, keys: list[str]) -> dict[str, float]:
+        """Price specific legs from the CLOB book, for positions out of quota."""
+        out: dict[str, float] = {}
+        for key in keys[:8]:
+            token_id = key.split(":", 1)[1] if ":" in key else key
+            bid, ask = await self._book(token_id)
+            if bid and ask and bid > 0 and ask > 0:
+                out[key] = round((bid + ask) / 2.0, 4)
+            elif ask and ask > 0:
+                out[key] = round(ask, 4)
+            elif bid and bid > 0:
+                out[key] = round(bid, 4)
+        return out
+
     async def get_quote(self, market: Market) -> Quote:
         if not self.deep_quotes:
             return market.quote()

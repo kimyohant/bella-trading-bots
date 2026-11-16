@@ -27,13 +27,43 @@ USER_AGENT = (
 _cache: dict[str, tuple[float, Any]] = {}
 _DEFAULT_TTL = 20.0
 
+# host -> monotonic deadline. A 429 is a request to stop asking, so retrying it
+# on the next tick is the one thing guaranteed to keep us locked out.
+_cooldown: dict[str, float] = {}
+_MIN_COOLDOWN = 5.0
+
 
 class HttpError(RuntimeError):
     """Raised when a request fails after all retries."""
 
 
+class HttpStatusError(HttpError):
+    """A response we can reason about, rather than a generic failure."""
+
+    def __init__(self, message: str, status: int, retry_after: float | None = None):
+        super().__init__(message)
+        self.status = status
+        self.retry_after = retry_after
+
+
 def cache_clear() -> None:
     _cache.clear()
+    _cooldown.clear()
+
+
+def cooling_down(url: str) -> float:
+    """Seconds left before `url`'s host may be asked again (0 = go ahead)."""
+    until = _cooldown.get(_host(url))
+    if not until:
+        return 0.0
+    return max(0.0, until - time.monotonic())
+
+
+def _host(url: str) -> str:
+    try:
+        return urllib.parse.urlsplit(url).hostname or url
+    except ValueError:
+        return url
 
 
 async def fetch_json(
@@ -54,12 +84,29 @@ async def fetch_json(
     if cached and cached[0] > time.monotonic():
         return cached[1]
 
+    host = _host(url)
+    wait = cooling_down(url)
+    if wait > 0:
+        # Fail fast instead of hammering a host that just told us to back off.
+        raise HttpError(f"GET {url} skipped: {host} cooling down {wait:.0f}s")
+
     last_error: Exception | None = None
     for attempt in range(retries + 1):
         try:
             data = await _request(url, headers=headers, timeout=timeout)
             _cache[url] = (time.monotonic() + ttl, data)
+            _cooldown.pop(host, None)
             return data
+        except HttpStatusError as exc:
+            last_error = exc
+            if exc.status in (429, 503):
+                # Retrying a rate limit immediately is what turns one 429 into a
+                # lockout. Park the whole host and let the next tick decide.
+                pause = max(exc.retry_after or 0.0, _MIN_COOLDOWN)
+                _cooldown[host] = time.monotonic() + pause
+                raise
+            if attempt < retries:
+                await asyncio.sleep(0.6 * (attempt + 1))
         except Exception as exc:  # noqa: BLE001 - we surface it after retries
             last_error = exc
             if attempt < retries:
@@ -125,10 +172,25 @@ async def _request(
     if httpx is not None:
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
             response = await client.get(url, headers=merged)
-            response.raise_for_status()
+            if response.status_code >= 400:
+                raise HttpStatusError(
+                    f"HTTP {response.status_code} for {url}",
+                    response.status_code,
+                    _retry_after(response.headers.get("retry-after")),
+                )
             return response.text if raw else response.json()
 
     return await asyncio.to_thread(_urllib_get, url, merged, timeout, raw)
+
+
+def _retry_after(value: Any) -> float | None:
+    """Parse Retry-After, which may be seconds or an HTTP date we ignore."""
+    if value is None:
+        return None
+    try:
+        return max(0.0, float(str(value).strip()))
+    except ValueError:
+        return None
 
 
 def _urllib_get(url: str, headers: dict[str, str], timeout: float, raw: bool) -> Any:
@@ -138,5 +200,9 @@ def _urllib_get(url: str, headers: dict[str, str], timeout: float, raw: bool) ->
             payload = response.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")[:200]
-        raise HttpError(f"HTTP {exc.code} for {url}: {body}") from exc
+        raise HttpStatusError(
+            f"HTTP {exc.code} for {url}: {body}",
+            exc.code,
+            _retry_after(exc.headers.get("Retry-After") if exc.headers else None),
+        ) from exc
     return payload if raw else json.loads(payload)
