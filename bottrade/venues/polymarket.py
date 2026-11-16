@@ -1,0 +1,269 @@
+"""Polymarket adapter — read-only market data.
+
+Sources (all public, no auth):
+  * Gamma API  https://gamma-api.polymarket.com  — market metadata & prices
+  * CLOB API   https://clob.polymarket.com       — order book (optional, per-token)
+  * Data API   https://data-api.polymarket.com   — public trade tape (whale signal)
+
+A binary market produces two legs. The YES leg carries the real book; the NO leg
+is synthesised from it, because buying NO at p is the same as selling YES at 1-p.
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+
+from ..config import Config
+from ..data.http import HttpError, fetch_json
+from ..models import Market, Quote, Venue
+from ..utils import clamp, parse_ts, utcnow
+from .base import VenueAdapter
+
+GAMMA_BASE = "https://gamma-api.polymarket.com"
+CLOB_BASE = "https://clob.polymarket.com"
+DATA_BASE = "https://data-api.polymarket.com"
+
+PRICE_FLOOR = 0.005
+PRICE_CEIL = 0.995
+
+
+class PolymarketVenue(VenueAdapter):
+    venue = Venue.POLYMARKET
+    name = "polymarket"
+
+    def __init__(self, cfg: Config):
+        self.cfg = cfg
+        self.limit = cfg.i("scanner.polymarket_limit", 60)
+        self.min_liquidity = cfg.f("scanner.polymarket_min_liquidity_usd", 5_000)
+        self.min_volume = cfg.f("scanner.polymarket_min_volume_24h_usd", 10_000)
+        self.max_days = cfg.f("scanner.polymarket_max_days_to_resolution", 45)
+        self.default_spread = cfg.f("scanner.polymarket_default_spread", 0.02)
+        self.deep_quotes = cfg.b("scanner.polymarket_deep_quotes", False)
+        self._errors = 0
+
+    # ------------------------------------------------------------------ markets
+    async def list_markets(self) -> list[Market]:
+        raw = await self._fetch_markets()
+        markets: list[Market] = []
+        for item in raw:
+            markets.extend(self._parse_market(item))
+        markets = [m for m in markets if self._passes_filters(m)]
+        markets.sort(key=lambda m: m.volume_24h_usd, reverse=True)
+        return markets
+
+    async def _fetch_markets(self) -> list[dict[str, Any]]:
+        base = {
+            "active": "true",
+            "closed": "false",
+            "limit": self.limit,
+        }
+        for params in (
+            {**base, "order": "volume24hr", "ascending": "false"},
+            {**base, "order": "volumeNum", "ascending": "false"},
+            base,
+        ):
+            try:
+                data = await fetch_json(f"{GAMMA_BASE}/markets", params=params, ttl=30)
+                break
+            except HttpError:
+                self._errors += 1
+                data = None
+        else:
+            return []
+        return _as_objects(data)
+
+    def _parse_market(self, item: dict[str, Any]) -> list[Market]:
+        outcomes = _json_list(item.get("outcomes"))
+        prices = _json_list(item.get("outcomePrices"))
+        tokens = _json_list(item.get("clobTokenIds"))
+        if not tokens or len(tokens) < 2:
+            return []
+
+        condition_id = str(item.get("conditionId") or item.get("id") or "")
+        question = str(item.get("question") or item.get("title") or "").strip()
+        if not question:
+            return []
+
+        end_date = parse_ts(item.get("endDate") or item.get("end_date_iso"))
+        liquidity = _num(item.get("liquidityNum"), _num(item.get("liquidity"), 0.0))
+        volume = _num(item.get("volume24hr"), _num(item.get("volumeNum"), 0.0))
+
+        quoted = _num(prices[0], 0.0) if prices else _num(item.get("lastTradePrice"), 0.0)
+        if not 0 < quoted < 1:
+            return []
+
+        half = max(self.default_spread, _num(item.get("spread"), self.default_spread)) / 2.0
+        yes_bid = _num(item.get("bestBid"), quoted - half)
+        yes_ask = _num(item.get("bestAsk"), quoted + half)
+        yes_bid = clamp(yes_bid, PRICE_FLOOR, PRICE_CEIL)
+        yes_ask = clamp(max(yes_ask, yes_bid + 0.001), PRICE_FLOOR, PRICE_CEIL)
+
+        # `outcomePrices` is often stale versus the live book, so trust the book
+        # when it exists: an edge measured against a stale price is not an edge.
+        has_book = item.get("bestBid") is not None and item.get("bestAsk") is not None
+        yes_price = (yes_bid + yes_ask) / 2.0 if has_book else quoted
+        yes_price = clamp(yes_price, PRICE_FLOOR, PRICE_CEIL)
+
+        change_1h = _num(item.get("oneHourPriceChange"))
+        change_24h = _num(item.get("oneDayPriceChange"))
+
+        tags: tuple[str, ...] = ()
+        category = item.get("category")
+        if isinstance(category, str) and category:
+            tags = (category.lower(),)
+
+        meta = {
+            "condition_id": condition_id,
+            "slug": item.get("slug"),
+            "neg_risk": bool(item.get("negRisk")),
+            "spread": round(yes_ask - yes_bid, 4),
+            "group": _event_title(item),
+            "change_1h": round(change_1h, 4),
+            "change_24h": round(change_24h, 4),
+        }
+
+        legs: list[Market] = []
+        for index in range(min(2, len(tokens))):
+            outcome = str(outcomes[index]) if index < len(outcomes) else ("Yes" if index == 0 else "No")
+            if index == 0:
+                price, bid, ask = yes_price, yes_bid, yes_ask
+            else:
+                price = clamp(1.0 - yes_price, PRICE_FLOOR, PRICE_CEIL)
+                bid = clamp(1.0 - yes_ask, PRICE_FLOOR, PRICE_CEIL)
+                ask = clamp(1.0 - yes_bid, PRICE_FLOOR, PRICE_CEIL)
+            legs.append(
+                Market(
+                    venue=self.venue,
+                    market_id=condition_id,
+                    question=question,
+                    token_id=str(tokens[index]),
+                    outcome=outcome,
+                    price=round(price, 4),
+                    bid=round(bid, 4),
+                    ask=round(ask, 4),
+                    liquidity_usd=liquidity,
+                    volume_24h_usd=volume,
+                    end_date=end_date,
+                    tags=tags,
+                    meta=dict(
+                        meta,
+                        leg=outcome,
+                        yes_price=yes_price,
+                        # a YES move up is a NO move down
+                        change_1h=meta["change_1h"] if index == 0 else -meta["change_1h"],
+                        change_24h=meta["change_24h"] if index == 0 else -meta["change_24h"],
+                    ),
+                )
+            )
+        return legs
+
+    def _passes_filters(self, market: Market) -> bool:
+        if market.liquidity_usd < self.min_liquidity:
+            return False
+        if market.volume_24h_usd < self.min_volume:
+            return False
+        hours = market.hours_to_resolution
+        if hours is not None and (hours <= 0 or hours > self.max_days * 24):
+            return False
+        return True
+
+    # ------------------------------------------------------------------- quotes
+    async def get_quote(self, market: Market) -> Quote:
+        if not self.deep_quotes:
+            return market.quote()
+        try:
+            book = await fetch_json(
+                f"{CLOB_BASE}/book", params={"token_id": market.token_id}, ttl=10
+            )
+        except HttpError:
+            return market.quote()
+
+        bids = book.get("bids") or []
+        asks = book.get("asks") or []
+        best_bid = max((_num(b.get("price"), 0.0) for b in bids), default=0.0) or None
+        best_ask = min((_num(a.get("price"), 1.0) for a in asks), default=0.0) or None
+        if not best_bid and not best_ask:
+            return market.quote()
+        return Quote(
+            bid=clamp(best_bid, PRICE_FLOOR, PRICE_CEIL) if best_bid else market.bid,
+            ask=clamp(best_ask, PRICE_FLOOR, PRICE_CEIL) if best_ask else market.ask,
+            last=market.price,
+            liquidity_usd=market.liquidity_usd,
+            ts=utcnow(),
+        )
+
+    # ------------------------------------------------------------------- tape
+    async def recent_trades(self) -> list[dict[str, Any]]:
+        limit = self.cfg.i("whale.lookback_trades", 150)
+        try:
+            raw = await fetch_json(
+                f"{DATA_BASE}/trades",
+                params={"limit": min(limit, 500), "takerOnly": "true"},
+                ttl=15,
+            )
+        except HttpError:
+            return []
+        out: list[dict[str, Any]] = []
+        for trade in _as_objects(raw):
+            asset = str(trade.get("asset") or "")
+            if not asset:
+                continue
+            size = _num(trade.get("size"), 0.0)
+            price = _num(trade.get("price"), 0.0)
+            out.append(
+                {
+                    "key": f"{self.venue.value}:{asset}",
+                    "side": str(trade.get("side", "")).upper(),
+                    "price": price,
+                    "qty": size,
+                    "notional": size * price,
+                    "wallet": str(trade.get("proxyWallet") or ""),
+                    "ts": parse_ts(trade.get("timestamp")),
+                    "market": trade.get("conditionId") or "",
+                    "title": trade.get("title") or "",
+                }
+            )
+        return out
+
+
+# ------------------------------------------------------------------ helpers
+
+def _as_objects(data: Any) -> list[dict[str, Any]]:
+    if isinstance(data, list):
+        return [item for item in data if isinstance(item, dict)]
+    if isinstance(data, dict):
+        for key in ("data", "markets", "results"):
+            value = data.get(key)
+            if isinstance(value, list):
+                return [item for item in value if isinstance(item, dict)]
+    return []
+
+
+def _json_list(value: Any) -> list[Any]:
+    """Gamma returns some array fields as JSON-encoded strings."""
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except (json.JSONDecodeError, ValueError):
+            return []
+        return parsed if isinstance(parsed, list) else []
+    return []
+
+
+def _num(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _event_title(item: dict[str, Any]) -> str:
+    events = item.get("events")
+    if isinstance(events, list) and events and isinstance(events[0], dict):
+        return str(events[0].get("title") or "")
+    return ""

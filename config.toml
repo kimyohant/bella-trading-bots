@@ -1,0 +1,133 @@
+# bottrade configuration
+# Every value here can be overridden by an env var: BOTTRADE__RISK__KELLY_FRACTION=0.3
+# (double underscore separates path segments, case-insensitive)
+
+[run]
+# live   = real venue APIs, paper fills (default safe mode)
+# mock   = synthetic market world, no network at all
+# replay = historical CSV (see `python -m bottrade backtest`)
+source = "mock"
+venues = ["polymarket", "pumpfun"]
+tick_seconds = 15
+seed = 7
+state_db = "state/bottrade.sqlite3"
+log_level = "INFO"
+log_file = "state/bottrade.log"
+
+[portfolio]
+starting_cash = 1000.0
+
+[fees]
+polymarket_fee_bps = 0        # Polymarket currently charges 0 bps on most markets
+polymarket_fixed_usd = 0.0
+pumpfun_fee_bps = 100         # pump.fun protocol fee ~1%
+solana_fee_usd = 0.02
+
+[slippage]
+polymarket_bps = 30
+pumpfun_bps = 250             # bonding curves move against you
+max_bps = 600                 # reject the order beyond this
+
+[agents]
+enabled = ["scanner", "sentiment", "whale", "signal", "risk", "executor", "portfolio"]
+# extra modules that register agents via @register("name") at import time
+custom_modules = []
+
+# ------------------------------------------------------------------ scanner
+[scanner]
+max_candidates = 24
+# per-venue quota so one venue cannot crowd out the other
+max_per_venue = 12
+min_price = 0.03
+max_price = 0.97
+max_spread_pct = 0.08
+min_liquidity_usd = 3000
+min_hours_to_resolution = 1.0
+
+polymarket_limit = 60
+polymarket_min_liquidity_usd = 5000
+polymarket_min_volume_24h_usd = 10000
+polymarket_max_days_to_resolution = 45
+polymarket_default_spread = 0.02
+# true = fetch the real CLOB book per token (slower, accurate bid/ask)
+polymarket_deep_quotes = false
+
+pumpfun_limit = 25
+pumpfun_min_market_cap_usd = 8000
+pumpfun_max_market_cap_usd = 500000
+pumpfun_min_age_minutes = 3
+pumpfun_max_age_minutes = 720
+pumpfun_include_complete = false
+pumpfun_spread_bps = 200
+pumpfun_sol_price_fallback = 150.0
+
+# ---------------------------------------------------------------- sentiment
+[sentiment]
+enabled = true
+model = "lexicon"             # lexicon | llm
+news_enabled = false          # Google News RSS headlines (needs network)
+news_weight = 0.6
+news_min_volume_usd = 20000
+max_news_queries_per_tick = 3
+# any OpenAI-compatible endpoint; key comes from BOTTRADE_LLM_KEY / OPENAI_API_KEY
+llm_base_url = ""
+llm_model = ""
+
+# -------------------------------------------------------------------- whale
+[whale]
+enabled = true
+min_notional_usd = 2000
+window_minutes = 60
+lookback_trades = 150
+pumpfun_enrich_top_n = 5
+
+# ------------------------------------------------------------------- signal
+[signal]
+min_edge = 0.05               # required (fair - ask) / ask
+min_confidence = 0.55
+max_signals_per_tick = 8
+max_signals_per_venue = 4
+momentum_weight = 0.35
+sentiment_weight = 0.30
+whale_weight = 0.25
+binary_logit_scale = 0.7      # how far a full-strength nudge moves a probability
+token_log_scale = 0.25        # same, in log space, for pump.fun tokens
+momentum_window = 20
+momentum_min_points = 4
+signal_ttl_seconds = 900
+
+# --------------------------------------------------------------------- risk
+[risk]
+kelly_fraction = 0.25         # quarter Kelly
+risk_per_trade_pct = 0.015    # used for non-binary (pump.fun) sizing
+max_position_pct = 0.08
+max_position_usd = 80
+max_total_exposure_pct = 0.45
+max_per_venue_pct = 0.30
+max_open_positions = 8
+max_positions_per_venue = 4
+max_spread_pct = 0.06
+min_liquidity_usd = 3000
+min_notional_usd = 5
+min_edge_after_costs = 0.03
+
+daily_loss_limit_pct = 0.08
+max_trades_per_day = 40
+cooldown_minutes = 30
+
+# Polymarket: binary markets that can take weeks to resolve
+stop_loss_pct = 0.35
+take_profit_pct = 1.5
+max_hold_hours = 24
+# pump.fun: memecoins live and die in hours, so tighter everything
+stop_loss_pct_token = 0.25
+take_profit_pct_token = 1.0
+max_hold_hours_token = 2.0
+exit_hours_before_resolution = 2
+# exit when the sentiment+flow thesis decays this much versus the entry reading
+thesis_flip_delta = 0.25
+min_hold_hours = 0.25
+
+# ------------------------------------------------------------------- report
+[report]
+out_dir = "reports"

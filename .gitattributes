@@ -1,0 +1,7 @@
+# Normalise line endings: the repo is Python + HTML, LF everywhere.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.ico binary
+*.sqlite3 binary
