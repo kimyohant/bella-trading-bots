@@ -193,9 +193,16 @@ def _cmd_scan(args, cfg: Config) -> int:
         print("no tradable markets returned (network down, or filters too tight)")
         return 1
 
+    from .models import CRYPTO_PROFILE
+
     if args.venue != "all":
-        markets = [m for m in markets if m.venue.value == args.venue]
-    markets = markets[: args.limit]
+        markets = [m for m in markets if m.venue.value == args.venue][: args.limit]
+    else:
+        # crypto trades on ~$1k of liquidity, so ranked by volume it never makes
+        # the cut — show it after the main list instead of hiding it
+        crypto = [m for m in markets if m.meta.get("profile") == CRYPTO_PROFILE]
+        regular = [m for m in markets if m.meta.get("profile") != CRYPTO_PROFILE]
+        markets = regular[: args.limit] + crypto[:6]
 
     print(f"\n  {len(markets)} markets\n")
     header = f"  {'venue':<11} {'price':>10} {'spread':>7} {'liq':>10} {'vol24h':>10}  market"
@@ -280,8 +287,8 @@ def _cmd_report(args, cfg: Config) -> int:
 def _cmd_agents() -> int:
     reg = registry()
     print(f"\n  {len(reg)} registered agents\n")
-    for name in ("guard", "scanner", "sentiment", "whale", "signal", "risk",
-                 "executor", "portfolio"):
+    for name in ("guard", "scanner", "sentiment", "whale", "crypto", "signal",
+                 "risk", "executor", "portfolio"):
         cls = reg.pop(name, None)
         if cls:
             print(f"  {name:<11} {_summary(cls)}")

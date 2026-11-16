@@ -29,9 +29,32 @@ pumpfun_bps = 250             # bonding curves move against you
 max_bps = 600                 # reject the order beyond this
 
 [agents]
-enabled = ["guard", "scanner", "sentiment", "whale", "signal", "risk", "executor", "portfolio"]
+enabled = ["guard", "scanner", "sentiment", "whale", "crypto", "signal", "risk", "executor", "portfolio"]
 # extra modules that register agents via @register("name") at import time
 custom_modules = []
+
+# ------------------------------------------------------------------- crypto
+# Polymarket's 15-minute BTC/ETH/XRP "Up or Down" markets: "Up" if the price at
+# the end of the window is at or above the price at the start. They resolve on
+# Chainlink's TWAP stream, so Coinbase spot is only a proxy for it — see section
+# 3.7 of the README before you trust an edge here.
+[crypto]
+enabled = true
+series = [
+  "btc-up-or-down-15m",
+  "eth-up-or-down-15m",
+  "xrp-up-or-down-15m",
+]
+windows_per_series = 2        # how many upcoming windows to list per symbol
+# Enter only with at least this much of the window left. It must exceed
+# risk.exit_seconds_before_window, or the bot buys and immediately sells.
+min_seconds_left = 300
+basis_bps = 4.0               # ignore moves smaller than this — that is feed basis
+min_z = 0.8                   # |move| / (sigma * sqrt(tau)) must clear this
+min_edge = 0.08               # required (fair - ask) / ask on these markets
+noise_edge = 0.08             # only log a rejection if the edge looked this big
+default_sigma_15m = 0.003     # fallback vol when candles are unavailable
+vol_lookback_minutes = 90
 
 # -------------------------------------------------------------------- guard
 # Runs first. Watches whether each venue is still answering, because everything
@@ -74,6 +97,15 @@ pumpfun_max_age_minutes = 720
 pumpfun_include_complete = false
 pumpfun_spread_bps = 200
 pumpfun_sol_price_fallback = 150.0
+
+# 15-minute crypto markets are a different size of business: ~$1k of liquidity is
+# normal, and a 1c spread on a 50c contract is tight, not wide.
+crypto_min_liquidity_usd = 400
+# a window that opened two minutes ago has ~zero volume by construction, so
+# liquidity is the gate that matters here, not turnover
+crypto_min_volume_24h_usd = 0
+crypto_max_spread_pct = 0.08
+crypto_max_candidates = 6
 
 # ---------------------------------------------------------------- sentiment
 [sentiment]
@@ -152,6 +184,17 @@ exit_hours_before_resolution = 2
 # exit when the sentiment+flow thesis decays this much versus the entry reading
 thesis_flip_delta = 0.25
 min_hold_hours = 0.25
+
+# --- 15-minute crypto --------------------------------------------------------
+# A window is 15 minutes long, so everything here is minutes, not hours, and the
+# position must be flat before the market resolves — we cannot settle a coin flip.
+stop_loss_pct_crypto = 0.30
+take_profit_pct_crypto = 1.0
+max_hold_minutes_crypto = 10
+exit_seconds_before_window = 120    # be flat this long before resolution
+max_crypto_positions = 2            # separate from max_positions_per_venue
+max_crypto_trades_per_day = 24      # so crypto cannot eat the whole daily budget
+max_position_usd_crypto = 40
 
 # ------------------------------------------------------------------- report
 [report]

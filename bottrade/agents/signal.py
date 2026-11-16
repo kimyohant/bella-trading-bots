@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import math
 from collections import deque
-from ..models import Market, Side, Signal, Venue
+from ..models import CRYPTO_PROFILE, Market, Side, Signal, Venue
 from ..utils import clamp, fmt_price, mean, sigmoid
 from .base import Agent, Context, register
 
@@ -43,6 +43,14 @@ class SignalAgent(Agent):
         for market in ctx.markets:
             prices = history.setdefault(market.key, deque(maxlen=history_len))
             prices.append(market.price)
+
+            # 15-minute crypto markets are priced by the crypto agent from spot,
+            # not by nudging the book price with sentiment and flow.
+            if market.meta.get("profile") == CRYPTO_PROFILE:
+                crypto_signal = self._crypto_signal(ctx, market)
+                if crypto_signal is not None:
+                    signals.append(crypto_signal)
+                continue
 
             components: dict[str, float] = {}
             coverage = 0.0
@@ -120,9 +128,15 @@ class SignalAgent(Agent):
         # Per-venue quota: a deep Polymarket book would otherwise fill every slot
         # and the bot would never look at a pump.fun token.
         max_per_venue = self.i("max_signals_per_venue", 4)
+        max_crypto = self.i("max_crypto_signals", 2)
         picked: list[Signal] = []
         per_venue: dict[Venue, int] = {}
+        crypto_picked = 0
         for signal in signals:
+            if signal.market.meta.get("profile") == CRYPTO_PROFILE:
+                if crypto_picked >= max_crypto:
+                    continue
+                crypto_picked += 1
             venue = signal.market.venue
             if per_venue.get(venue, 0) >= max_per_venue:
                 continue
@@ -140,6 +154,50 @@ class SignalAgent(Agent):
             "signals=%d (of %d candidates), best edge %.1f%%",
             len(ctx.signals), len(ctx.markets),
             (ctx.signals[0].edge * 100) if ctx.signals else 0.0,
+        )
+
+
+    def _crypto_signal(self, ctx: Context, market: Market) -> Signal | None:
+        """Turn the crypto agent's fair probability into a signal, or nothing."""
+        info = (ctx.state.get("crypto") or {}).get(market.key)
+        if not info or info.get("blocked"):
+            return None
+
+        fair = float(info["fair"])
+        ask = market.ask or market.price
+        if ask <= 0 or fair <= ask:
+            return None
+        edge = (fair - ask) / ask
+        # crypto has its own threshold: the basis risk is bigger than the
+        # mispricing on an ordinary opinion market, so it demands more edge
+        if edge < self.cfg.f("crypto.min_edge", 0.08):
+            return None
+
+        z = abs(float(info["z"]))
+        tau = float(info["tau_s"])
+        spread_penalty = clamp(1.0 - market.spread_pct / 0.08, 0.0, 1.0)
+        confidence = clamp(
+            0.42
+            + 0.28 * min(z / 2.5, 1.0)
+            + 0.20 * clamp(tau / 300.0, 0.0, 1.0)
+            + 0.10 * spread_penalty,
+            0.0, 0.95,
+        )
+        if confidence < self.f("min_confidence", 0.55):
+            return None
+
+        reasons = [
+            f"fair {fmt_price(fair)} vs ask {fmt_price(ask)} (+{edge * 100:.1f}%)",
+            f"{info['symbol']} {info['move_bps']:+.0f}bp vs open, z={info['z']:+.2f}",
+            f"{tau / 60:.1f}m left, sigma {info['sigma_15m'] * 100:.2f}%/15m",
+        ]
+        return Signal(
+            market=market,
+            side=Side.BUY,
+            fair_price=round(fair, 6),
+            confidence=round(confidence, 4),
+            reasons=reasons,
+            ttl_seconds=self.i("signal_ttl_seconds", 900),
         )
 
 

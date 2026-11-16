@@ -6,6 +6,7 @@ Built-in agents, in pipeline order:
     scanner    build the tradable universe and publish quotes
     sentiment  lexicon / news / LLM probability nudge
     whale      aggressive-flow imbalance from public trade data
+    crypto     fair probability for the 15-minute up/down markets, from spot
     signal     combine nudges into a fair price and emit signals
     risk       exits, hard gates, position sizing
     executor   send sized orders to the broker

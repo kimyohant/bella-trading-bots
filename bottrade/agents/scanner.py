@@ -11,7 +11,8 @@ from __future__ import annotations
 import math
 from typing import Any
 
-from ..models import Market, Venue
+from ..models import CRYPTO_PROFILE, Market, Venue
+from ..utils import utcnow
 from .base import Agent, Context, register
 
 
@@ -33,9 +34,29 @@ class ScannerAgent(Agent):
         max_candidates = self.i("max_candidates", 24)
 
         kept: list[Market] = []
+        crypto: list[Market] = []
         dropped = {"price": 0, "spread": 0, "liquidity": 0, "resolution": 0}
 
+        crypto_max_spread = self.f("crypto_max_spread_pct", 0.08)
+        crypto_min_liq = self.f("crypto_min_liquidity_usd", 400.0)
+
         for market in raw:
+            if market.meta.get("profile") == CRYPTO_PROFILE:
+                # A 15-minute market resolves in minutes and trades on ~$1k of
+                # liquidity by design. The political-market filters would drop
+                # every single one of them, so judge them on their own terms.
+                if market.spread_pct > crypto_max_spread:
+                    dropped["spread"] += 1
+                    continue
+                if market.liquidity_usd < crypto_min_liq:
+                    dropped["liquidity"] += 1
+                    continue
+                if not (min_price <= market.price <= max_price):
+                    dropped["price"] += 1
+                    continue
+                crypto.append(market)
+                continue
+
             if market.venue is Venue.POLYMARKET:
                 if not (min_price <= market.price <= max_price):
                     dropped["price"] += 1
@@ -68,6 +89,12 @@ class ScannerAgent(Agent):
         if len(quota) > max_candidates:
             quota = quota[:max_candidates]
 
+        # Crypto keeps its own book. Ranked by volume it would never survive a
+        # combined cut against the political markets, and it must not crowd them
+        # out either — so it gets a separate, small slot on top.
+        crypto.sort(key=_crypto_rank, reverse=True)
+        quota.extend(crypto[: self.i("crypto_max_candidates", 6)])
+
         ctx.markets = quota
         ctx.quotes = {m.key: m.quote() for m in quota}
         ctx.state["universe_size"] = len(quota)
@@ -92,3 +119,14 @@ def _rank(market: Market) -> float:
     if market.venue is Venue.PUMPFUN:
         depth += 0.4  # small universe, keep memecoins in view
     return depth - penalty
+
+
+def _crypto_rank(market: Market) -> float:
+    """Live window first, then depth, then tightness.
+
+    The next window is listed alongside the current one so the bot can see it
+    coming, but it has no opening price yet and must not take a trading slot.
+    """
+    start = market.meta.get("window_start") or 0
+    live = 1.0 if start <= utcnow().timestamp() else 0.0
+    return live * 1e6 + market.liquidity_usd - market.spread_pct * 1_000.0

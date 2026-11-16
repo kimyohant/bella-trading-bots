@@ -16,7 +16,7 @@ from typing import Any
 
 from ..config import Config
 from ..data.http import HttpError, fetch_json
-from ..models import Market, Quote, Venue
+from ..models import CRYPTO_PROFILE, Market, Quote, Venue
 from ..utils import clamp, parse_ts, utcnow
 from .base import VenueAdapter
 
@@ -42,6 +42,18 @@ class PolymarketVenue(VenueAdapter):
         self.deep_quotes = cfg.b("scanner.polymarket_deep_quotes", False)
         self._errors = 0
 
+        # 15-minute crypto up/down series (btc-up-or-down-15m, ...)
+        self.crypto_enabled = cfg.b("crypto.enabled", True)
+        self.crypto_series = [
+            str(s).strip() for s in cfg.list("crypto.series", []) if str(s).strip()
+        ]
+        self.crypto_windows = max(1, cfg.i("crypto.windows_per_series", 2))
+        self.crypto_min_liquidity = cfg.f("scanner.crypto_min_liquidity_usd", 400.0)
+        # Volume is a useless gate here: a window that opened two minutes ago has
+        # a 24h volume of roughly zero by construction.
+        self.crypto_min_volume = cfg.f("scanner.crypto_min_volume_24h_usd", 0.0)
+        self.crypto_max_spread = cfg.f("scanner.crypto_max_spread_pct", 0.08)
+
     # ------------------------------------------------------------------ markets
     async def list_markets(self) -> list[Market]:
         raw = await self._fetch_markets()
@@ -50,6 +62,7 @@ class PolymarketVenue(VenueAdapter):
             markets.extend(self._parse_market(item))
         markets = [m for m in markets if self._passes_filters(m)]
         markets.sort(key=lambda m: m.volume_24h_usd, reverse=True)
+        markets.extend(await self._fetch_crypto())
         return markets
 
     async def _fetch_markets(self) -> list[dict[str, Any]]:
@@ -168,6 +181,143 @@ class PolymarketVenue(VenueAdapter):
             return False
         return True
 
+    # ---------------------------------------------------------- crypto 15m
+    async def _fetch_crypto(self) -> list[Market]:
+        """The 15-minute up/down series.
+
+        They never appear in the volume-ordered top-60 listing and their
+        liquidity is an order of magnitude below the political markets, so they
+        need their own query and their own (much lower) filters.
+        """
+        if not self.crypto_enabled or not self.crypto_series:
+            return []
+
+        out: list[Market] = []
+        for series in self.crypto_series:
+            try:
+                data = await fetch_json(
+                    f"{GAMMA_BASE}/events",
+                    params={
+                        "series_slug": series,
+                        "closed": "false",
+                        "order": "endDate",
+                        "ascending": "true",
+                        "limit": self.crypto_windows,
+                    },
+                    ttl=20,
+                )
+            except HttpError:
+                self._errors += 1
+                continue
+            for event in _as_objects(data):
+                for item in event.get("markets") or []:
+                    if isinstance(item, dict):
+                        out.extend(await self._parse_crypto(item, event))
+
+        return [m for m in out if self._passes_crypto(m)]
+
+    async def _parse_crypto(
+        self, item: dict[str, Any], event: dict[str, Any]
+    ) -> list[Market]:
+        tokens = _json_list(item.get("clobTokenIds"))
+        if len(tokens) < 2:
+            return []
+
+        slug = str(event.get("slug") or item.get("slug") or "")
+        symbol = slug.split("-")[0].upper() if slug else ""
+        if not symbol:
+            return []
+
+        end_date = parse_ts(event.get("endDate") or item.get("endDate"))
+        if end_date is None:
+            return []
+        end_ts = int(end_date.timestamp())
+        start_ts = _slug_ts(slug) or (end_ts - 900)
+
+        question = str(item.get("question") or event.get("title") or "").strip()
+        condition_id = str(item.get("conditionId") or item.get("id") or "")
+        liquidity = _num(item.get("liquidityNum"), _num(item.get("liquidity"), 0.0))
+        volume = _num(item.get("volume24hr"), _num(item.get("volumeNum"), 0.0))
+        outcomes = _json_list(item.get("outcomes")) or ["Up", "Down"]
+
+        # Gamma's bestBid/bestAsk on these markets lag the real book by minutes —
+        # on one BTC window it read 0.56/0.57 while the CLOB was 0.49/0.50. On a
+        # fifteen-minute bet that gap is the whole trade, so read the book itself.
+        books = {index: await self._book(str(tokens[index])) for index in range(2)}
+
+        legs: list[Market] = []
+        for index in range(2):
+            bid, ask = books.get(index, (None, None))
+            if bid is None or ask is None:
+                bid = _num(item.get("bestBid"), 0.0) or None
+                ask = _num(item.get("bestAsk"), 0.0) or None
+            if not bid or not ask:
+                continue
+            bid = clamp(bid, PRICE_FLOOR, PRICE_CEIL)
+            ask = clamp(max(ask, bid + 0.001), PRICE_FLOOR, PRICE_CEIL)
+            outcome = (
+                str(outcomes[index]) if index < len(outcomes)
+                else ("Up" if index == 0 else "Down")
+            )
+            legs.append(
+                Market(
+                    venue=self.venue,
+                    market_id=condition_id,
+                    question=question,
+                    token_id=str(tokens[index]),
+                    outcome=outcome,
+                    price=round((bid + ask) / 2.0, 4),
+                    bid=round(bid, 4),
+                    ask=round(ask, 4),
+                    liquidity_usd=liquidity,
+                    volume_24h_usd=volume,
+                    end_date=end_date,
+                    tags=("crypto", "updown"),
+                    meta={
+                        "condition_id": condition_id,
+                        "slug": slug,
+                        "profile": CRYPTO_PROFILE,
+                        "symbol": symbol,
+                        "window_start": start_ts,
+                        "window_end": end_ts,
+                        "leg": outcome,
+                        "spread": round(ask - bid, 4),
+                        "group": str(event.get("title") or ""),
+                        "change_1h": 0.0,
+                        "change_24h": 0.0,
+                    },
+                )
+            )
+        return legs
+
+    async def _book(self, token_id: str) -> tuple[float | None, float | None]:
+        try:
+            book = await fetch_json(
+                f"{CLOB_BASE}/book", params={"token_id": token_id}, ttl=8
+            )
+        except HttpError:
+            return None, None
+        bids = book.get("bids") or []
+        asks = book.get("asks") or []
+        best_bid = max((_num(b.get("price"), 0.0) for b in bids), default=0.0) or None
+        best_ask = min(
+            (_num(a.get("price"), 1.0) for a in asks if _num(a.get("price"), 0.0) > 0),
+            default=0.0,
+        ) or None
+        return best_bid, best_ask
+
+    def _passes_crypto(self, market: Market) -> bool:
+        if market.liquidity_usd < self.crypto_min_liquidity:
+            return False
+        if market.volume_24h_usd < self.crypto_min_volume:
+            return False
+        if market.spread_pct > self.crypto_max_spread:
+            return False
+        hours = market.hours_to_resolution
+        if hours is not None and hours <= 0:
+            return False
+        return True
+
     # ------------------------------------------------------------------- quotes
     async def get_quote(self, market: Market) -> Quote:
         if not self.deep_quotes:
@@ -267,3 +417,13 @@ def _event_title(item: dict[str, Any]) -> str:
     if isinstance(events, list) and events and isinstance(events[0], dict):
         return str(events[0].get("title") or "")
     return ""
+
+
+def _slug_ts(slug: str) -> int:
+    """Trailing unix timestamp of an updown slug (`btc-updown-15m-1794798000`)."""
+    tail = slug.rsplit("-", 1)[-1] if slug else ""
+    try:
+        value = int(tail)
+    except ValueError:
+        return 0
+    return value if 1_500_000_000 < value < 2_500_000_000 else 0

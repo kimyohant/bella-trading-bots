@@ -16,7 +16,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Any
 
-from ..models import Market, Order, Position, Side, Signal, Venue
+from ..models import CRYPTO_PROFILE, Market, Order, Position, Side, Signal, Venue
 from ..utils import clamp, utcnow
 from .base import Agent, Context, register
 
@@ -92,6 +92,14 @@ class RiskAgent(Agent):
             self.f("take_profit_pct_token", 1.0),
             self.f("max_hold_hours_token", 2.0),
         )
+        # A 15-minute window is over before any of the above can matter, and it
+        # resolves to 0 or 1 — so the only acceptable end state is flat.
+        crypto = (
+            self.f("stop_loss_pct_crypto", 0.30),
+            self.f("take_profit_pct_crypto", 1.0),
+            self.f("max_hold_minutes_crypto", 10.0) / 60.0,
+        )
+        exit_seconds = self.f("exit_seconds_before_window", 120.0)
 
         orders: list[Order] = []
         by_key = ctx.market_by_key()
@@ -105,6 +113,12 @@ class RiskAgent(Agent):
             stop_loss, take_profit, max_hold = (
                 token if market.venue is Venue.PUMPFUN else binary
             )
+            is_crypto = (
+                market.meta.get("profile") == CRYPTO_PROFILE
+                or position.profile == CRYPTO_PROFILE
+            )
+            if is_crypto:
+                stop_loss, take_profit, max_hold = crypto
             reason = None
             qty_fraction = 1.0
             ret = position.return_pct
@@ -131,6 +145,11 @@ class RiskAgent(Agent):
                 reason = (
                     f"trailing-stop peak {peak * 100:+.0f}% -> {ret * 100:+.0f}%"
                 )
+            elif is_crypto and (
+                market.hours_to_resolution is not None
+                and market.hours_to_resolution * 3600.0 <= exit_seconds
+            ):
+                reason = f"window-end {market.hours_to_resolution * 3600.0:.0f}s left"
             elif position.age_hours >= max_hold:
                 reason = f"max-hold {position.age_hours:.1f}h"
             else:
@@ -149,6 +168,7 @@ class RiskAgent(Agent):
                     )
                 elif (
                     market.venue is Venue.POLYMARKET
+                    and not is_crypto
                     and market.hours_to_resolution is not None
                     and 0 <= market.hours_to_resolution <= near_resolution
                 ):
@@ -225,9 +245,27 @@ class RiskAgent(Agent):
         venue_exposure = ctx.broker.exposure_by_venue()
         total_exposure = ctx.broker.gross_exposure()
 
+        max_crypto_positions = self.i("max_crypto_positions", 2)
+        max_crypto_trades = self.i("max_crypto_trades_per_day", 24)
+        max_position_usd_crypto = self.f("max_position_usd_crypto", 40.0)
+        crypto_positions = sum(
+            1 for p in ctx.broker.positions.values() if p.profile == CRYPTO_PROFILE
+        )
+        crypto_trades = int(state.get("crypto_trades_today", 0))
+        crypto_added = 0
+
         for signal in ctx.signals:
             market = signal.market
             group = (market.venue, market.question)
+            is_crypto = market.meta.get("profile") == CRYPTO_PROFILE
+
+            if is_crypto:
+                if crypto_positions + crypto_added >= max_crypto_positions:
+                    ctx.reject(market, f"crypto cap: {max_crypto_positions} open")
+                    continue
+                if crypto_trades + crypto_added >= max_crypto_trades:
+                    ctx.reject(market, f"crypto cap: {max_crypto_trades} trades today")
+                    continue
 
             if len(ctx.broker.positions) + len(orders) >= max_positions:
                 ctx.reject(market, f"max_open_positions ({max_positions})")
@@ -260,6 +298,10 @@ class RiskAgent(Agent):
                 continue
 
             size_usd = self._size(ctx, signal, equity, max_position_pct, max_position_usd)
+            if is_crypto:
+                # a coin flip with a 15-minute clock does not deserve a full
+                # Kelly slice, however good the number looks
+                size_usd = min(size_usd, max_position_usd_crypto)
             if size_usd <= 0:
                 ctx.reject(market, "size resolved to zero")
                 continue
@@ -302,6 +344,8 @@ class RiskAgent(Agent):
             venue_exposure[market.venue] = venue_exposure.get(market.venue, 0.0) + notional
             venue_positions[market.venue] = venue_positions.get(market.venue, 0) + 1
             open_groups.add(group)
+            if is_crypto:
+                crypto_added += 1
 
         return orders
 
@@ -334,4 +378,5 @@ def _market_from_position(position: Position) -> Market:
         price=position.last_price,
         bid=position.last_price,
         ask=position.last_price,
+        meta={"profile": position.profile} if position.profile else {},
     )

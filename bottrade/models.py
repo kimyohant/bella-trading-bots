@@ -13,6 +13,9 @@ from typing import Any
 
 from .utils import hours_between, utcnow
 
+# Market families that need their own risk profile and pricing model.
+CRYPTO_PROFILE = "crypto_updown"
+
 
 class Venue(str, Enum):
     POLYMARKET = "polymarket"
@@ -211,6 +214,7 @@ class Position:
     entry_thesis: float = 0.0
     high_water: float = 0.0
     partial_taken: bool = False
+    profile: str = ""  # CRYPTO_PROFILE for the 15-minute series
 
     @property
     def is_open(self) -> bool:

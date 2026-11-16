@@ -7,7 +7,7 @@ pointed at a live adapter later without any agent changing.
 
 from __future__ import annotations
 
-from ..models import Side
+from ..models import CRYPTO_PROFILE, Side
 from ..utils import fmt_price, utcnow
 from ..venues.paper import OrderRejected
 from .base import Agent, Context, register
@@ -44,6 +44,13 @@ class ExecutorAgent(Agent):
                 position = ctx.broker.positions.get(order.key)
                 if position is not None:
                     position.entry_thesis = order.thesis
+                    position.profile = str(order.market.meta.get("profile") or "")
+                    if position.profile == CRYPTO_PROFILE:
+                        # crypto has its own daily budget so 15-minute windows
+                        # cannot eat the trades the rest of the book needs
+                        ctx.state["crypto_trades_today"] = (
+                            ctx.state.get("crypto_trades_today", 0) + 1
+                        )
             else:
                 # a sell that leaves a remainder means we took partial profit;
                 # the risk agent must not fire that same partial rule twice
