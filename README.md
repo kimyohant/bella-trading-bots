@@ -107,6 +107,11 @@ python -m bottrade serve --no-run --db state/bottrade.sqlite3   # ดู run เ
 ทางเทคนิค: `http.server` ของ stdlib ล้วน, bind `127.0.0.1` เท่านั้น, อ่าน sqlite ด้วย read-only
 connection แยกต่อ request (เปิด WAL ไว้) จึงอ่านได้ขณะบอทเขียน โดยไม่บล็อกกัน
 
+**restart บอทแล้ว dashboard ยังตามทัน** — `tick` เป็นตัวนับของ process ที่เริ่มใหม่ที่ 1 ทุกครั้ง
+จึงใช้เป็น key ข้าม run ไม่ได้ dashboard จึงเลือก "ชุดโพซิชันที่เขียนล่าสุด" จาก
+`ticks.open_positions` ของ tick ล่าสุด ไม่ใช่ `MAX(tick)` (ของเก่า tick 39 จะทับของใหม่ tick 12
+แล้วจอจะค้างทั้งที่บอทเทรดอยู่) — เจอบั๊กนี้ตอน restart จริง ไม่ใช่ตอนเขียนโค้ด
+
 API ที่เรียกได้ตรง ๆ:
 
 ```bash
@@ -407,11 +412,12 @@ BOTTRADE__RISK__KELLY_FRACTION=0.15 BOTTRADE__SIGNAL__MIN_EDGE=0.08 python -m bo
 python -m unittest discover -s bottrade/tests -t . -v
 ```
 
-98 tests ครอบ: broker fills/fees/slippage/partial, Kelly sizing, ทุก hard gate, exits,
+100 tests ครอบ: broker fills/fees/slippage/partial, Kelly sizing, ทุก hard gate, exits,
 sentiment lexicon+negation, guard staleness + dead-man's switch + no-fabricated-fills,
 crypto fair value + basis gate + risk profile + spread/venue isolation จาก binary book,
 delisted-token write-off (vs. feed outage),
 429 host cooldown (fail-fast ไม่ยิงซ้ำ) + DexScreener fallback + การ re-mark โพซิชันที่หลุด quota,
+dashboard ที่ตาม run ล่าสุดได้แม้ tick counter จะเริ่มใหม่ที่ 1,
 sqlite logging, report generation, backtest, monitor snapshot API
 
 ---
