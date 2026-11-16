@@ -72,6 +72,13 @@ class RiskAgent(Agent):
         forced: set[Any] = ctx.state.get("stale_forced") or set()
         stale_action = self.cfg.s("guard.stale_action", "hold")
 
+        # Holding beats inventing a fill off a frozen mark — but only while the
+        # venue is expected back. A token that is delisted (no price, no volume)
+        # never comes back, and waiting for guard.max_stale_hours strands the
+        # capital and freezes equity on a number nobody can trade. After this
+        # long without a quote the position is written off at its last mark.
+        dead_mark_minutes = self.f("dead_mark_minutes", 15.0)
+
         # Profit handling. A fixed target alone is not enough: a position that runs
         # to +90% and then reverses must not be allowed to round-trip back to the
         # stop. So we (a) take half off at a first target, (b) trail the rest.
@@ -129,7 +136,23 @@ class RiskAgent(Agent):
             if position.avg_price > 0 and position.high_water > 0:
                 peak = (position.high_water - position.avg_price) / position.avg_price
 
-            if ret <= -stop_loss:
+            # A token the venue still refuses to quote while it is happily
+            # quoting everything else has been delisted, not gone quiet. Every
+            # rule below reads `ret`, computed from a mark we can no longer
+            # trust, so the write-off is decided before them. Note the venue
+            # must be *alive*: if the whole feed is down the token is fine and
+            # the guard's hold (then max_stale_hours) is the right answer.
+            mark_age_min = _minutes_since(position.marked_at or position.opened_at)
+            write_off = (
+                dead_mark_minutes > 0
+                and position.venue is Venue.PUMPFUN
+                and mark_age_min >= dead_mark_minutes
+                and position.venue not in stale
+            )
+
+            if write_off:
+                reason = f"unpriced {mark_age_min:.0f}m (no {position.venue.value} quote)"
+            elif ret <= -stop_loss:
                 reason = f"stop-loss {ret * 100:.1f}%"
             elif ret >= take_profit:
                 reason = f"take-profit {ret * 100:+.1f}%"
@@ -395,6 +418,13 @@ class RiskAgent(Agent):
 
 
 # ------------------------------------------------------------------- helpers
+
+def _minutes_since(when) -> float:
+    """Minutes elapsed since `when`, clamped at zero for clock skew."""
+    if when is None:
+        return 0.0
+    return max(0.0, (utcnow() - when).total_seconds() / 60.0)
+
 
 def _market_from_position(position: Position) -> Market:
     return Market(

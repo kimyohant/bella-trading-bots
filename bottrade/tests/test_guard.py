@@ -168,6 +168,93 @@ class TestNoFabricatedFills(unittest.TestCase):
         self.assertNotIn("stale-forced", ctx.orders[0].reason)
 
 
+class TestUnpricedPosition(unittest.TestCase):
+    """A delisted token must be written off, not held until max_stale_hours.
+
+    Live case: `anthropig` stopped trading (no price, no volume, no liquidity on
+    either feed). It left the universe, so `PaperBroker.mark` never touched it
+    again and its last price froze. Every exit rule reads a return computed from
+    that mark, so none of them could fire, equity sat on an untradeable number
+    for the rest of the run, and the dashboard looked hung.
+
+    The signal that matters is *the venue is quoting other tokens but not this
+    one*. A feed that is down entirely says nothing about the token, so those
+    positions are still held.
+    """
+
+    def _setup(self, dead_mark_minutes=15.0, unmarked_for_min=20.0, price=0.20):
+        cfg = Config({
+            "guard": {"max_quote_age_ticks": 1, "max_stale_hours": 6.0,
+                      "stale_action": "hold"},
+            "risk": {"stop_loss_pct": 0.30, "dead_mark_minutes": dead_mark_minutes},
+        })
+        brk = broker()
+        pos = Position(
+            key="pumpfun:pf1", venue=Venue.PUMPFUN, token_id="pf1",
+            question="anthropig", qty=2_000_000, avg_price=1.6e-05,
+            last_price=1.6e-05 * price / 0.20, high_water=1.6e-05,
+            opened_at=utcnow() - timedelta(hours=1),
+            marked_at=utcnow() - timedelta(minutes=unmarked_for_min),
+        )
+        brk.positions[pos.key] = pos
+        return cfg, brk, pos
+
+    def _venue_alive_without_the_token(self, cfg, ctx):
+        """pump.fun is answering (other token), ours is not in the quotes."""
+        ticks(GuardAgent(cfg), ctx, both(), 1)
+        self.assertEqual(ctx.state["stale_venues"], set())
+
+    def _venue_down(self, cfg, ctx):
+        ticks(GuardAgent(cfg), ctx, [market()], 1)  # only polymarket answers
+        self.assertIn(Venue.PUMPFUN, ctx.state["stale_venues"])
+
+    def test_delisted_token_is_written_off(self):
+        cfg, brk, _ = self._setup()
+        ctx = context(cfg, brk, both())
+        self._venue_alive_without_the_token(cfg, ctx)
+
+        run(RiskAgent(cfg), ctx)
+        self.assertEqual(len(ctx.orders), 1, [r["reason"] for r in ctx.rejections])
+        self.assertIn("unpriced", ctx.orders[0].reason)
+
+    def test_write_off_beats_a_stale_stop_loss(self):
+        # mark shows -40%, but the mark is the thing we no longer trust
+        cfg, brk, _ = self._setup(price=0.12)
+        ctx = context(cfg, brk, both())
+        self._venue_alive_without_the_token(cfg, ctx)
+
+        run(RiskAgent(cfg), ctx)
+        self.assertEqual(len(ctx.orders), 1)
+        self.assertIn("unpriced", ctx.orders[0].reason)
+        self.assertNotIn("stop-loss", ctx.orders[0].reason)
+
+    def test_a_feed_outage_is_not_a_delisting(self):
+        # -40% on the mark and the whole venue is dark: hold, do not write off.
+        cfg, brk, _ = self._setup(price=0.12)
+        ctx = context(cfg, brk, [market()])
+        self._venue_down(cfg, ctx)
+
+        run(RiskAgent(cfg), ctx)
+        self.assertEqual(len(ctx.orders), 0)
+        self.assertTrue(any("stale-mark" in r["reason"] for r in ctx.rejections))
+
+    def test_freshly_marked_token_is_left_alone(self):
+        cfg, brk, _ = self._setup(unmarked_for_min=1.0)
+        ctx = context(cfg, brk, both())
+        self._venue_alive_without_the_token(cfg, ctx)
+
+        run(RiskAgent(cfg), ctx)
+        self.assertEqual(len(ctx.orders), 0)
+
+    def test_rule_can_be_disabled(self):
+        cfg, brk, _ = self._setup(dead_mark_minutes=0.0)
+        ctx = context(cfg, brk, both())
+        self._venue_alive_without_the_token(cfg, ctx)
+
+        run(RiskAgent(cfg), ctx)
+        self.assertEqual(len(ctx.orders), 0)
+
+
 class TestDeadman(unittest.TestCase):
     def test_empty_feed_halts_entries(self):
         cfg = Config({

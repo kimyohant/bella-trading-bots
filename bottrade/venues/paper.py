@@ -86,6 +86,7 @@ class PaperBroker:
             if price and price > 0:
                 position.last_price = price
                 position.high_water = max(position.high_water, price)
+                position.marked_at = utcnow()
 
     # ---------------------------------------------------------------- execution
     def fill_price(self, order: Order, quote: Quote) -> tuple[float, float]:

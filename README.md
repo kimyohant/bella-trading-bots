@@ -143,6 +143,21 @@ stale_action = "hold"       # hold = ไม่ยอม fill ปลอม (ค�
 ผลข้างเคียงที่ตั้งใจ: ตอน venue ล่ม ระบบจะ **ไม่ขาย** อะไรเลย แล้วพอ venue กลับมา
 stop-loss/trailing จะยิงทันทีด้วยราคาจริง — ช้ากว่าแต่ซื่อสัตย์กว่า
 
+**แต่ "ไม่ขาย" ต้องมีวันสิ้นสุด** — เคสจริง: token `anthropig` ตายไปดื้อ ๆ
+(DexScreener ตอบ `priceUsd: null`, volume 0) มันหลุดออกจาก universe จึงไม่มีใคร
+mark ราคาให้อีก `last_price` แข็งค้าง → `return_pct` ค้าง → กฎ exit ทุกข้อที่อ่าน
+`return_pct` ยิงไม่ได้สักข้อ → equity แข็งอยู่ที่ตัวเลขที่เทรดไม่ได้ และ dashboard
+ดูเหมือนแฮงค์ ทั้งที่ API ยังส่งข้อมูลสด ๆ อยู่
+
+`risk.dead_mark_minutes` แก้ตรงนี้. เงื่อนไขคือ **venue ยังตอบอยู่ แต่ไม่ยอม quote
+token ตัวนี้** — นั่นคือสัญญาณว่า delisted ไม่ใช่ feed ล่ม (ถ้า feed ล่มทั้ง venue
+ยังไงก็ต้อง hold) พอครบกำหนดจะปิดไม้ที่ราคาล่าสุดพร้อมเหตุผล `unpriced Nm`
+
+```toml
+[risk]
+dead_mark_minutes = 15      # 0 = ปิดกฎนี้
+```
+
 ---
 
 ## 3.7 ตลาด 15 นาที: BTC / ETH / XRP
@@ -328,6 +343,7 @@ implement 3 method ใน `bottrade/venues/base.py::VenueAdapter` (`list_markets
 | health | `guard.max_quote_age_ticks` | `3` | ขาดกี่ tick ถึงนับว่า venue ค้าง |
 | health | `guard.max_empty_ticks` | `5` | ไม่มีข้อมูลเลยกี่ tick ถึง halt |
 | health | `guard.stale_action` | `hold` | ไม่ยอม fill ด้วยราคาค้าง |
+| exit | `risk.dead_mark_minutes` | `15` | token ที่ venue ไม่ quote แล้ว = delisted |
 | crypto | `crypto.basis_bps` | `4` | ต่ำกว่านี้คือ basis noise ไม่ใช่ edge |
 | crypto | `crypto.min_z` | `0.8` | สัญญาณต้องแรงพอ |
 | crypto | `crypto.min_seconds_left` | `300` | ต้องเหลือเวลาให้เข้าออก |
@@ -381,9 +397,10 @@ BOTTRADE__RISK__KELLY_FRACTION=0.15 BOTTRADE__SIGNAL__MIN_EDGE=0.08 python -m bo
 python -m unittest discover -s bottrade/tests -t . -v
 ```
 
-74 tests ครอบ: broker fills/fees/slippage/partial, Kelly sizing, ทุก hard gate, exits,
+79 tests ครอบ: broker fills/fees/slippage/partial, Kelly sizing, ทุก hard gate, exits,
 sentiment lexicon+negation, guard staleness + dead-man's switch + no-fabricated-fills,
 crypto fair value + basis gate + risk profile + spread/venue isolation จาก binary book,
+delisted-token write-off (vs. feed outage),
 sqlite logging, report generation, backtest, monitor snapshot API
 
 ---

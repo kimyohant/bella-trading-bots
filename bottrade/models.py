@@ -215,6 +215,10 @@ class Position:
     high_water: float = 0.0
     partial_taken: bool = False
     profile: str = ""  # CRYPTO_PROFILE for the 15-minute series
+    # last time this position received a quote. `last_price` alone cannot tell a
+    # quiet market from an unpriced one, and an unpriced position can never be
+    # exited honestly — so the age of this timestamp is what risk acts on.
+    marked_at: datetime | None = None
 
     @property
     def is_open(self) -> bool:

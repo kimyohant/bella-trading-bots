@@ -186,6 +186,11 @@ stop_loss_pct_token = 0.25
 take_profit_pct_token = 1.0
 max_hold_hours_token = 2.0
 exit_hours_before_resolution = 2
+# A position on a dark venue with no quote for this long is unpriced, not quiet:
+# the token was delisted (no price, no volume) and will never come back. Waiting
+# for guard.max_stale_hours strands the capital and freezes equity on a number
+# nobody can trade, so it is written off at its last mark. 0 disables the rule.
+dead_mark_minutes = 15
 # exit when the sentiment+flow thesis decays this much versus the entry reading
 thesis_flip_delta = 0.25
 min_hold_hours = 0.25
