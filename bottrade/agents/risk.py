@@ -233,26 +233,41 @@ class RiskAgent(Agent):
         max_position_usd = self.f("max_position_usd", 80.0)
         min_edge = self.f("min_edge_after_costs", 0.03)
         max_spread = self.f("max_spread_pct", 0.06)
+        max_spread_crypto = self.f("crypto_max_spread_pct", 0.08)
         min_liquidity = self.f("min_liquidity_usd", 5_000.0)
         cooldown_min = self.f("cooldown_minutes", 30.0)
         min_notional = self.f("min_notional_usd", 5.0)
 
         orders: list[Order] = []
         open_groups = {(p.venue, p.question) for p in ctx.broker.positions.values()}
+
+        # Crypto keeps its own book. It has separate caps below, so counting it
+        # in the venue counters would let two 15-minute positions halve
+        # Polymarket's capacity for the binary book — which is exactly what a
+        # "separate cap" is supposed to prevent.
         venue_positions: dict[Venue, int] = {}
+        venue_exposure: dict[Venue, float] = {venue: 0.0 for venue in Venue}
+        crypto_positions = 0
+        crypto_exposure = 0.0
         for position in ctx.broker.positions.values():
+            if position.profile == CRYPTO_PROFILE:
+                crypto_positions += 1
+                crypto_exposure += position.market_value
+                continue
             venue_positions[position.venue] = venue_positions.get(position.venue, 0) + 1
-        venue_exposure = ctx.broker.exposure_by_venue()
+            venue_exposure[position.venue] = (
+                venue_exposure.get(position.venue, 0.0) + position.market_value
+            )
         total_exposure = ctx.broker.gross_exposure()
 
         max_crypto_positions = self.i("max_crypto_positions", 2)
         max_crypto_trades = self.i("max_crypto_trades_per_day", 24)
         max_position_usd_crypto = self.f("max_position_usd_crypto", 40.0)
-        crypto_positions = sum(
-            1 for p in ctx.broker.positions.values() if p.profile == CRYPTO_PROFILE
-        )
         crypto_trades = int(state.get("crypto_trades_today", 0))
         crypto_added = 0
+        # Crypto is sized by its own caps, so it gets its own exposure budget
+        # instead of borrowing Polymarket's 30%.
+        crypto_room = max_crypto_positions * max_position_usd_crypto - crypto_exposure
 
         for signal in ctx.signals:
             market = signal.market
@@ -270,7 +285,7 @@ class RiskAgent(Agent):
             if len(ctx.broker.positions) + len(orders) >= max_positions:
                 ctx.reject(market, f"max_open_positions ({max_positions})")
                 continue
-            if venue_positions.get(market.venue, 0) >= max_per_venue_positions:
+            if not is_crypto and venue_positions.get(market.venue, 0) >= max_per_venue_positions:
                 ctx.reject(
                     market,
                     f"venue cap: {max_per_venue_positions} open on {market.venue.value}",
@@ -287,8 +302,15 @@ class RiskAgent(Agent):
                     ctx.reject(market, f"cooldown {age_min:.0f}/{cooldown_min:.0f} min")
                     continue
 
-            if market.spread_pct > max_spread:
-                ctx.reject(market, f"spread {market.spread_pct * 100:.1f}% > {max_spread * 100:.1f}%")
+            # A 15-minute leg trades near 15c, where the minimum 1c tick is
+            # already ~7% of price. Judging it by the binary book's 6% cap
+            # rejects every cheap leg — and the cheap legs are where the edge is.
+            spread_cap = max_spread_crypto if is_crypto else max_spread
+            if market.spread_pct > spread_cap:
+                ctx.reject(
+                    market,
+                    f"spread {market.spread_pct * 100:.1f}% > {spread_cap * 100:.1f}%",
+                )
                 continue
             if market.liquidity_usd < min_liquidity:
                 ctx.reject(market, f"liquidity ${market.liquidity_usd:,.0f} too thin")
@@ -308,7 +330,10 @@ class RiskAgent(Agent):
 
             # portfolio budgets
             room_total = equity * max_total - total_exposure
-            room_venue = equity * max_venue - venue_exposure.get(market.venue, 0.0)
+            if is_crypto:
+                room_venue = crypto_room
+            else:
+                room_venue = equity * max_venue - venue_exposure.get(market.venue, 0.0)
             room_cash = ctx.broker.cash * 0.95
             budget = min(size_usd, room_total, room_venue, room_cash)
             if budget < min_notional:
@@ -341,11 +366,13 @@ class RiskAgent(Agent):
                 )
             )
             total_exposure += notional
-            venue_exposure[market.venue] = venue_exposure.get(market.venue, 0.0) + notional
-            venue_positions[market.venue] = venue_positions.get(market.venue, 0) + 1
             open_groups.add(group)
             if is_crypto:
                 crypto_added += 1
+                crypto_room -= notional
+            else:
+                venue_exposure[market.venue] = venue_exposure.get(market.venue, 0.0) + notional
+                venue_positions[market.venue] = venue_positions.get(market.venue, 0) + 1
 
         return orders
 

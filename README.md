@@ -208,7 +208,22 @@ exit_seconds_before_window = 120    # ออกก่อนปิดหน้า
 max_crypto_positions = 2            # แยกจาก max_positions_per_venue
 max_crypto_trades_per_day = 24      # กัน crypto กิน budget ทั้งวัน
 max_position_usd_crypto = 40        # coin flip ไม่ควรได้ Kelly เต็มก้อน
+crypto_max_spread_pct = 0.08        # ต้อง >= scanner.crypto_max_spread_pct
 ```
+
+**กับดักสองข้อที่เคยทำให้ crypto ไม่เทรดเลย** — ทั้งคู่แก้แล้วใน `risk.py`:
+
+1. **spread สองชั้นไม่ตรงกัน.** scanner รับที่ 8% แต่ risk ใช้ `max_spread_pct = 0.06`
+   ร่วมกับตลาด binary ทำให้ leg ราคา 14.5¢ ที่มี spread 1¢ (= 6.9%) ถูก reject ทุกตัว
+   ทั้งที่ leg พวกนี้คือที่ที่ edge อยู่ (วัดจาก run จริง: ETH +34.3%, BTC +20.8%)
+   ตอนนี้ crypto ใช้ `crypto_max_spread_pct` ของตัวเอง แยกจาก binary
+   → **กฎง่าย ๆ: leg ที่ราคาต่ำกว่า ~16.7¢ จะเทรดไม่ได้ถ้า cap ยังเป็น 6%**
+
+2. **crypto กินโควต้า venue ของ Polymarket.** position ทุกตัวนับรวมเป็น
+   `venue_positions[POLYMARKET]` แม้จะแยก cap เป็น `max_crypto_positions` แล้ว
+   เท่ากับ 2 ไม้ 15 นาทีจะลดความจุของ binary book จาก 4 เหลือ 2
+   ตอนนี้ crypto ไม่ถูกนับใน venue cap/exposure ของ binary และได้ budget
+   `max_crypto_positions × max_position_usd_crypto` เป็นของตัวเอง
 
 **ข้อควรรู้ก่อนเชื่อตัวเลข** — โมเดลนี้อ้างอิง Coinbase ไม่ใช่ Chainlink:
 basis ระหว่างสองเจ้าคือความเสี่ยงจริงของ strategy นี้, ตลาดพวกนี้บาง (liquidity $1k–$12k)
@@ -299,7 +314,8 @@ implement 3 method ใน `bottrade/venues/base.py::VenueAdapter` (`list_markets
 | size | `risk.kelly_fraction` | `0.25` | quarter Kelly — สูงกว่านี้คือเดิมพันแรง |
 | size | `risk.max_position_pct` | `0.08` | ไม่เกิน 8% ของ equity ต่อโพซิชัน |
 | risk | `risk.daily_loss_limit_pct` | `0.08` | ขาดทุน 8%/วัน = หยุดเปิดออเดอร์ใหม่ |
-| risk | `risk.max_positions_per_venue` | `4` | กันกระจุกตัวในเจ้าเดียว |
+| risk | `risk.max_positions_per_venue` | `4` | กันกระจุกตัวในเจ้าเดียว (ไม่นับ crypto) |
+| risk | `risk.crypto_max_spread_pct` | `0.08` | leg 15 นาทีราคาต่ำ spread 1c = ~7% |
 | exit | `risk.stop_loss_pct` | `0.35` | binary market |
 | exit | `risk.stop_loss_pct_token` | `0.25` | memecoin (ผันผวนกว่า) |
 | exit | `risk.max_hold_hours_token` | `2.0` | memecoin ไม่ควรถือ 24 ชม. |
@@ -365,10 +381,10 @@ BOTTRADE__RISK__KELLY_FRACTION=0.15 BOTTRADE__SIGNAL__MIN_EDGE=0.08 python -m bo
 python -m unittest discover -s bottrade/tests -t . -v
 ```
 
-67 tests ครอบ: broker fills/fees/slippage/partial, Kelly sizing, ทุก hard gate, exits,
+74 tests ครอบ: broker fills/fees/slippage/partial, Kelly sizing, ทุก hard gate, exits,
 sentiment lexicon+negation, guard staleness + dead-man's switch + no-fabricated-fills,
-crypto fair value + basis gate + risk profile, sqlite logging, report generation,
-backtest, monitor snapshot API
+crypto fair value + basis gate + risk profile + spread/venue isolation จาก binary book,
+sqlite logging, report generation, backtest, monitor snapshot API
 
 ---
 

@@ -153,6 +153,11 @@ max_per_venue_pct = 0.30
 max_open_positions = 8
 max_positions_per_venue = 4
 max_spread_pct = 0.06
+# A 15-minute leg trades near 15c, where the minimum 1c tick is already ~7% of
+# price. Judged by the 6% above, every cheap leg is rejected — and the cheap
+# legs are exactly where the model finds edge. Keep this >= scanner's
+# crypto_max_spread_pct or the scanner will admit markets risk always refuses.
+crypto_max_spread_pct = 0.08
 min_liquidity_usd = 3000
 min_notional_usd = 5
 min_edge_after_costs = 0.03

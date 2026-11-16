@@ -217,6 +217,120 @@ class TestCryptoRisk(unittest.TestCase):
         self.assertLessEqual(ctx.orders[0].notional, 40.0 + 1e-6)
 
 
+class TestRiskSpreadAndVenueIsolation(unittest.TestCase):
+    """The two thresholds that used to cancel the whole crypto feature.
+
+    A 15-minute leg trades near 15c, where the minimum 1c tick is already ~7% of
+    price. The scanner admitted those legs at 8% and risk then refused them at
+    6%, so every crypto signal died at the last gate. And because crypto
+    positions are Polymarket positions, they were also consuming the binary
+    book's four venue slots.
+    """
+
+    def _open(self, brk, name, profile="", qty=100.0, price=0.50):
+        pos = Position(
+            key=f"polymarket:{name}", venue=Venue.POLYMARKET, token_id=name,
+            question=f"question {name}", qty=qty, avg_price=price,
+            last_price=price, high_water=price, profile=profile,
+            opened_at=utcnow() - timedelta(minutes=2),
+        )
+        brk.positions[pos.key] = pos
+        return pos
+
+    def _cfg(self, **risk):
+        base = {
+            "min_edge_after_costs": 0.0,
+            "max_spread_pct": 0.06,
+            "crypto_max_spread_pct": 0.08,
+            "max_open_positions": 8,
+            "max_positions_per_venue": 4,
+            "max_crypto_positions": 2,
+            "max_per_venue_pct": 0.99,
+            "max_total_exposure_pct": 0.99,
+            "cooldown_minutes": 0.0,
+        }
+        base.update(risk)
+        return Config({"risk": base})
+
+    def test_cheap_crypto_leg_clears_its_own_spread_cap(self):
+        # 1c spread on a 14.5c leg = 6.9%: over the binary cap, under the crypto one
+        market = crypto_market(price=0.145, spread=0.01, seconds_left=600)
+        self.assertAlmostEqual(market.spread_pct, 0.0689, places=3)
+        cfg = self._cfg()
+        signal = Signal(market=market, side=Side.BUY, fair_price=0.20, confidence=0.9)
+        ctx = context(cfg, broker(), [market])
+        ctx.signals = [signal]
+        asyncio.run(RiskAgent(cfg).run(ctx))
+        self.assertEqual(len(ctx.orders), 1, [r["reason"] for r in ctx.rejections])
+
+    def test_binary_book_keeps_the_tight_cap(self):
+        market = plain_market(price=0.145)
+        self.assertGreater(market.spread_pct, 0.06)
+        cfg = self._cfg()
+        signal = Signal(market=market, side=Side.BUY, fair_price=0.25, confidence=0.9)
+        ctx = context(cfg, broker(), [market])
+        ctx.signals = [signal]
+        asyncio.run(RiskAgent(cfg).run(ctx))
+        self.assertEqual(len(ctx.orders), 0)
+        self.assertTrue(any("spread" in r["reason"] for r in ctx.rejections))
+
+    def test_crypto_position_does_not_consume_a_venue_slot(self):
+        cfg = self._cfg()
+        brk = broker()
+        for i in range(3):
+            self._open(brk, f"binary{i}")
+        for i in range(2):
+            self._open(brk, f"crypto{i}", profile=CRYPTO_PROFILE)
+
+        market = plain_market(price=0.50)
+        signal = Signal(market=market, side=Side.BUY, fair_price=0.90, confidence=0.9)
+        ctx = context(cfg, brk, [market])
+        ctx.signals = [signal]
+        asyncio.run(RiskAgent(cfg).run(ctx))
+
+        # 3 binary + 1 new = 4, the cap; the two crypto positions are not counted
+        self.assertEqual(len(ctx.orders), 1, [r["reason"] for r in ctx.rejections])
+
+    def test_fourth_binary_position_still_hits_the_venue_cap(self):
+        cfg = self._cfg()
+        brk = broker()
+        for i in range(4):
+            self._open(brk, f"binary{i}")
+
+        market = plain_market(price=0.50)
+        signal = Signal(market=market, side=Side.BUY, fair_price=0.90, confidence=0.9)
+        ctx = context(cfg, brk, [market])
+        ctx.signals = [signal]
+        asyncio.run(RiskAgent(cfg).run(ctx))
+        self.assertEqual(len(ctx.orders), 0)
+        self.assertTrue(any("venue cap" in r["reason"] for r in ctx.rejections))
+
+    def test_crypto_is_not_blocked_by_a_full_binary_venue(self):
+        cfg = self._cfg(max_positions_per_venue=1)
+        brk = broker()
+        self._open(brk, "binary0")
+
+        market = crypto_market(price=0.50, seconds_left=600)
+        signal = Signal(market=market, side=Side.BUY, fair_price=0.90, confidence=0.9)
+        ctx = context(cfg, brk, [market])
+        ctx.signals = [signal]
+        asyncio.run(RiskAgent(cfg).run(ctx))
+        self.assertEqual(len(ctx.orders), 1, [r["reason"] for r in ctx.rejections])
+
+    def test_crypto_exposure_budget_is_separate(self):
+        # The binary venue budget is fully used, but crypto has its own room.
+        cfg = self._cfg(max_per_venue_pct=0.03)
+        brk = broker()
+        self._open(brk, "binary0", qty=100.0, price=0.50)  # $50 = 5% of equity
+
+        market = crypto_market(price=0.50, seconds_left=600)
+        signal = Signal(market=market, side=Side.BUY, fair_price=0.90, confidence=0.9)
+        ctx = context(cfg, brk, [market])
+        ctx.signals = [signal]
+        asyncio.run(RiskAgent(cfg).run(ctx))
+        self.assertEqual(len(ctx.orders), 1, [r["reason"] for r in ctx.rejections])
+
+
 class TestScannerKeepsCrypto(unittest.TestCase):
     def test_short_window_survives_the_resolution_filter(self):
         cfg = Config({
