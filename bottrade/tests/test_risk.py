@@ -150,10 +150,13 @@ class TestGates(unittest.TestCase):
 
 
 class TestExits(unittest.TestCase):
-    def _position(self, brk, avg=0.50, last=0.50, age_hours=0.0):
+    def _position(self, brk, avg=0.50, last=0.50, age_hours=0.0, high_water=None,
+                  partial_taken=False):
         pos = Position(
             key="polymarket:tok1", venue=Venue.POLYMARKET, token_id="tok1",
             question="Q?", qty=100, avg_price=avg, last_price=last,
+            high_water=high_water if high_water is not None else max(avg, last),
+            partial_taken=partial_taken,
             opened_at=utcnow() - timedelta(hours=age_hours),
         )
         brk.positions[pos.key] = pos
@@ -203,6 +206,98 @@ class TestExits(unittest.TestCase):
         ctx.markets = [market(price=0.52, bid=0.51, ask=0.53)]
         asyncio.run(agent.run(ctx))
         self.assertEqual(len(ctx.orders), 0)
+
+
+class TestProfitTaking(unittest.TestCase):
+    """The bug this covers: a +90% winner round-tripping back to the stop-loss."""
+
+    def _run(self, cfg, brk, price):
+        agent = RiskAgent(cfg)
+        ctx = context(cfg, brk)
+        ctx.markets = [market(price=price, bid=price - 0.01, ask=price + 0.01)]
+        asyncio.run(agent.run(ctx))
+        return ctx
+
+    def test_trailing_stop_locks_in_profit(self):
+        cfg = Config({"risk": {"trail_arm_pct": 0.35, "trail_giveback_pct": 0.30,
+                               "take_profit_pct": 5.0}})
+        brk = broker()
+        # avg 0.40, ran to 0.76 (+90%), now back at 0.50 (+25%)
+        pos = Position(
+            key="polymarket:tok1", venue=Venue.POLYMARKET, token_id="tok1",
+            question="Q?", qty=100, avg_price=0.40, last_price=0.50,
+            high_water=0.76, opened_at=utcnow(),
+        )
+        brk.positions[pos.key] = pos
+
+        ctx = self._run(cfg, brk, 0.50)
+        self.assertEqual(len(ctx.orders), 1)
+        self.assertIn("trailing-stop", ctx.orders[0].reason)
+        self.assertAlmostEqual(ctx.orders[0].qty, 100, places=6)
+
+    def test_trailing_not_armed_below_threshold(self):
+        cfg = Config({"risk": {"trail_arm_pct": 0.35, "trail_giveback_pct": 0.30,
+                               "take_profit_pct": 5.0, "stop_loss_pct": 0.5}})
+        brk = broker()
+        # peak only +20%: never armed, and +5% now is not a loss either
+        pos = Position(
+            key="polymarket:tok1", venue=Venue.POLYMARKET, token_id="tok1",
+            question="Q?", qty=100, avg_price=0.40, last_price=0.42,
+            high_water=0.48, opened_at=utcnow(),
+        )
+        brk.positions[pos.key] = pos
+        ctx = self._run(cfg, brk, 0.42)
+        self.assertEqual(len(ctx.orders), 0)
+
+    def test_partial_take_profit_sells_half(self):
+        cfg = Config({"risk": {"take_profit_partial_pct": 0.60,
+                               "take_profit_partial_fraction": 0.5,
+                               "take_profit_pct": 1.5, "trail_arm_pct": 5.0}})
+        brk = broker()
+        pos = Position(
+            key="polymarket:tok1", venue=Venue.POLYMARKET, token_id="tok1",
+            question="Q?", qty=100, avg_price=0.40, last_price=0.66,
+            high_water=0.66, opened_at=utcnow(),
+        )
+        brk.positions[pos.key] = pos
+
+        ctx = self._run(cfg, brk, 0.66)
+        self.assertEqual(len(ctx.orders), 1)
+        self.assertIn("partial", ctx.orders[0].reason)
+        self.assertAlmostEqual(ctx.orders[0].qty, 50, places=6)
+
+    def test_partial_does_not_fire_twice(self):
+        cfg = Config({"risk": {"take_profit_partial_pct": 0.60,
+                               "take_profit_partial_fraction": 0.5,
+                               "take_profit_pct": 1.5, "trail_arm_pct": 5.0}})
+        brk = broker()
+        pos = Position(
+            key="polymarket:tok1", venue=Venue.POLYMARKET, token_id="tok1",
+            question="Q?", qty=50, avg_price=0.40, last_price=0.66,
+            high_water=0.66, partial_taken=True, opened_at=utcnow(),
+        )
+        brk.positions[pos.key] = pos
+        ctx = self._run(cfg, brk, 0.66)
+        self.assertEqual(len(ctx.orders), 0)
+
+    def test_hard_target_still_wins_over_trailing(self):
+        cfg = Config({"risk": {"take_profit_pct_token": 1.0, "trail_arm_pct": 0.35,
+                               "trail_giveback_pct": 0.30}})
+        brk = broker()
+        pos = Position(
+            key="pumpfun:tok1", venue=Venue.PUMPFUN, token_id="tok1",
+            question="T", qty=1_000_000, avg_price=1e-5, last_price=2.1e-5,
+            high_water=2.1e-5, opened_at=utcnow(),
+        )
+        brk.positions[pos.key] = pos
+        agent = RiskAgent(cfg)
+        ctx = context(cfg, brk)
+        ctx.markets = [market(price=2.1e-5, bid=2.08e-5, ask=2.12e-5,
+                              venue=Venue.PUMPFUN)]
+        asyncio.run(agent.run(ctx))
+        self.assertEqual(len(ctx.orders), 1)
+        self.assertIn("take-profit", ctx.orders[0].reason)
+        self.assertNotIn("trailing", ctx.orders[0].reason)
 
 
 if __name__ == "__main__":

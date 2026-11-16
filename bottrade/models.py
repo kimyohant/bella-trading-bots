@@ -210,6 +210,7 @@ class Position:
     entry_edge: float = 0.0
     entry_thesis: float = 0.0
     high_water: float = 0.0
+    partial_taken: bool = False
 
     @property
     def is_open(self) -> bool:

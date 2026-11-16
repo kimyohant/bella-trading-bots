@@ -44,6 +44,12 @@ class ExecutorAgent(Agent):
                 position = ctx.broker.positions.get(order.key)
                 if position is not None:
                     position.entry_thesis = order.thesis
+            else:
+                # a sell that leaves a remainder means we took partial profit;
+                # the risk agent must not fire that same partial rule twice
+                remaining = ctx.broker.positions.get(order.key)
+                if remaining is not None:
+                    remaining.partial_taken = True
 
             direction = "BUY " if order.side is Side.BUY else "SELL"
             pnl = f" pnl={fill.realized_pnl:+.2f}" if fill.realized_pnl else ""

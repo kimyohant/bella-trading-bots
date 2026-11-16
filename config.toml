@@ -115,6 +115,17 @@ daily_loss_limit_pct = 0.08
 max_trades_per_day = 40
 cooldown_minutes = 30
 
+# --- taking profit -----------------------------------------------------------
+# A fixed target alone lets a +90% winner round-trip into a -27% loser. Three
+# rules work together: bank half at the first target, trail the rest, and keep a
+# hard target as the outer bound.
+take_profit_partial_pct = 0.60      # first target: sell half
+take_profit_partial_fraction = 0.5  # how much of the position to take off
+
+trail_arm_pct = 0.35                # only start trailing after +35% unrealised
+trail_giveback_pct = 0.30           # exit if it gives back 30% of the peak gain
+                                    # (peak +90% -> exits around +63%)
+
 # Polymarket: binary markets that can take weeks to resolve
 stop_loss_pct = 0.35
 take_profit_pct = 1.5

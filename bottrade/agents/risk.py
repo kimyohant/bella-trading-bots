@@ -65,6 +65,14 @@ class RiskAgent(Agent):
         flip_delta = self.f("thesis_flip_delta", 0.25)
         min_hold = self.f("min_hold_hours", 0.25)
 
+        # Profit handling. A fixed target alone is not enough: a position that runs
+        # to +90% and then reverses must not be allowed to round-trip back to the
+        # stop. So we (a) take half off at a first target, (b) trail the rest.
+        partial_target = self.f("take_profit_partial_pct", 0.60)
+        partial_fraction = clamp(self.f("take_profit_partial_fraction", 0.5), 0.05, 1.0)
+        trail_arm = self.f("trail_arm_pct", 0.35)
+        trail_giveback = clamp(self.f("trail_giveback_pct", 0.30), 0.05, 0.95)
+
         # A binary market can resolve over weeks; a memecoin cannot. Separate
         # risk parameters per venue keep the two from fighting each other.
         binary = (
@@ -91,12 +99,31 @@ class RiskAgent(Agent):
                 token if market.venue is Venue.PUMPFUN else binary
             )
             reason = None
+            qty_fraction = 1.0
             ret = position.return_pct
+
+            # best return this position has ever shown (high_water is a price,
+            # tracked by PaperBroker.mark on every tick)
+            peak = 0.0
+            if position.avg_price > 0 and position.high_water > 0:
+                peak = (position.high_water - position.avg_price) / position.avg_price
 
             if ret <= -stop_loss:
                 reason = f"stop-loss {ret * 100:.1f}%"
             elif ret >= take_profit:
                 reason = f"take-profit {ret * 100:+.1f}%"
+            elif (
+                not position.partial_taken
+                and partial_target > 0
+                and ret >= partial_target
+                and position.market_value * partial_fraction >= self.f("min_notional_usd", 5.0) * 2
+            ):
+                reason = f"take-profit-partial {ret * 100:+.1f}% (half off)"
+                qty_fraction = partial_fraction
+            elif peak >= trail_arm and ret <= peak * (1.0 - trail_giveback):
+                reason = (
+                    f"trailing-stop peak {peak * 100:+.0f}% -> {ret * 100:+.0f}%"
+                )
             elif position.age_hours >= max_hold:
                 reason = f"max-hold {position.age_hours:.1f}h"
             else:
@@ -127,7 +154,7 @@ class RiskAgent(Agent):
                 Order(
                     market=market,
                     side=Side.SELL,
-                    qty=position.qty,
+                    qty=position.qty * qty_fraction,
                     limit_price=market.bid or price,
                     reason=reason,
                     tag="exit",

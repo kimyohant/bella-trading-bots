@@ -197,6 +197,10 @@ implement 3 method ใน `bottrade/venues/base.py::VenueAdapter` (`list_markets
 | exit | `risk.stop_loss_pct` | `0.35` | binary market |
 | exit | `risk.stop_loss_pct_token` | `0.25` | memecoin (ผันผวนกว่า) |
 | exit | `risk.max_hold_hours_token` | `2.0` | memecoin ไม่ควรถือ 24 ชม. |
+| profit | `risk.take_profit_partial_pct` | `0.60` | ถึง +60% ขายครึ่งแรก |
+| profit | `risk.take_profit_partial_fraction` | `0.5` | สัดส่วนที่ขายตอนถึงเป้าแรก |
+| profit | `risk.trail_arm_pct` | `0.35` | เริ่ม trailing หลังกำไร +35% |
+| profit | `risk.trail_giveback_pct` | `0.30` | ถอยจากจุดสูงสุด 30% ของกำไร → ออก |
 | fill | `slippage.pumpfun_bps` | `250` | curve เลื่อนสวนทาง |
 | fill | `fees.pumpfun_fee_bps` | `100` | protocol fee ~1% |
 
@@ -205,6 +209,29 @@ override ด้วย env ได้ทุกค่า (ไม่ต้องแ�
 ```bash
 BOTTRADE__RISK__KELLY_FRACTION=0.15 BOTTRADE__SIGNAL__MIN_EDGE=0.08 python -m bottrade run --source live
 ```
+
+### ทำไมต้องมี 3 กฎขายทำกำไร ไม่ใช่ target เดียว
+
+ถ้าตั้งแต่ target คงที่ (เช่น +100%) ตัวที่วิ่งไป +90% แล้วกลับตัวจะไม่ถูกขายเลย
+แล้วไหลลงไปชน stop loss — กลายเป็นขาดทุนทั้งที่เคยกำไรเกือบเท่าตัว
+
+ลำดับที่ `risk` ตรวจ (บนลงล่าง ตัวแรกที่จริงชนะ):
+
+1. `stop-loss` — ขาดทุนถึงเกณฑ์ ตัดทิ้ง
+2. `take-profit` — ถึง target สูงสุด ขายหมด
+3. `take-profit-partial` — ถึงเป้าแรก ขายครึ่ง เก็บที่เหลือไว้วิ่ง
+4. `trailing-stop` — เคยขึ้นถึง `trail_arm_pct` แล้วถอยเกิน `trail_giveback_pct` ของกำไรสูงสุด
+5. `max-hold` — ถือนานเกิน
+6. `thesis-decay` — sentiment/flow เปลี่ยนทางจากตอนเข้า
+
+ทดสอบกับ mock 400 ticks (seed เดียวกัน) จะเห็นผลชัด:
+
+| | target เดียว | + partial + trailing |
+|---|---|---|
+| realized PnL | +$112.51 | **+$144.69** |
+| win rate | 44% | **92%** |
+| stop-loss ที่ขาดทุน | 5 ครั้ง (−$61.05) | 1 ครั้ง (−$13.09) |
+| position ที่เคยกำไร >40% แล้วจบขาดทุน | 4 ตัว | **0 ตัว** |
 
 ---
 
