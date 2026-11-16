@@ -361,6 +361,10 @@ implement 3 method ใน `bottrade/venues/base.py::VenueAdapter` (`list_markets
 | health | `guard.stale_action` | `hold` | ไม่ยอม fill ด้วยราคาค้าง |
 | exit | `risk.dead_mark_minutes` | `15` | token ที่ venue ไม่ quote แล้ว = delisted |
 | data | `scanner.pumpfun_fallback_allow_graduated` | `true` | ผ่อน filter "graduated" เฉพาะ source DexScreener |
+| universe | `scanner.polymarket_limit` | `100` | Gamma จำกัด 100 แถว/หน้า — ต่ำกว่านี้คือทิ้งฟรี |
+| universe | `scanner.polymarket_pages` | `2` | 100×2 วัดได้ 64 ตลาดผ่าน filter (เดิม 60×1 = 21) |
+| universe | `scanner.max_per_venue` | `20` | quota ต่อ venue — เดิม 12 ทั้งที่ venue ส่งมา 21 |
+| universe | `signal.max_signals_per_venue` | `8` | ให้ risk เห็นตัวเลือกมากกว่า 4 ต่อ tick |
 | crypto | `crypto.basis_bps` | `4` | ต่ำกว่านี้คือ basis noise ไม่ใช่ edge |
 | crypto | `crypto.min_z` | `0.8` | สัญญาณต้องแรงพอ |
 | crypto | `crypto.min_seconds_left` | `300` | ต้องเหลือเวลาให้เข้าออก |
@@ -414,13 +418,14 @@ BOTTRADE__RISK__KELLY_FRACTION=0.15 BOTTRADE__SIGNAL__MIN_EDGE=0.08 python -m bo
 python -m unittest discover -s bottrade/tests -t . -v
 ```
 
-108 tests ครอบ: broker fills/fees/slippage/partial, Kelly sizing, ทุก hard gate, exits,
+123 tests ครอบ: broker fills/fees/slippage/partial, Kelly sizing, ทุก hard gate, exits,
 sentiment lexicon+negation, guard staleness + dead-man's switch + no-fabricated-fills,
 crypto fair value + basis gate + risk profile + spread/venue isolation จาก binary book,
 delisted-token write-off (vs. feed outage),
 429 host cooldown (fail-fast ไม่ยิงซ้ำ) + DexScreener fallback + การ re-mark โพซิชันที่หลุด quota,
 dashboard ที่ตาม run ล่าสุดได้แม้ tick counter จะเริ่มใหม่ที่ 1,
 ช่องต่อ venue (pump.fun 6 / polymarket 4) + trail arm ที่เอื้อมถึง,
+การแบ่งหน้าของ Gamma (100 แถว/หน้า, dedupe ข้ามหน้า) + quota ของ scanner,
 sqlite logging, report generation, backtest, monitor snapshot API
 
 ---

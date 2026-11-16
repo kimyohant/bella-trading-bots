@@ -34,7 +34,11 @@ class PolymarketVenue(VenueAdapter):
 
     def __init__(self, cfg: Config):
         self.cfg = cfg
-        self.limit = cfg.i("scanner.polymarket_limit", 60)
+        # Gamma caps a page at 100 rows whatever you ask for, so 60 was already
+        # leaving markets on the table: at limit=100 thirty-five pass the filters
+        # against twenty-one at limit=60, for the same single request.
+        self.limit = min(cfg.i("scanner.polymarket_limit", 100), 100)
+        self.pages = max(1, cfg.i("scanner.polymarket_pages", 2))
         self.min_liquidity = cfg.f("scanner.polymarket_min_liquidity_usd", 5_000)
         self.min_volume = cfg.f("scanner.polymarket_min_volume_24h_usd", 10_000)
         self.max_days = cfg.f("scanner.polymarket_max_days_to_resolution", 45)
@@ -66,25 +70,46 @@ class PolymarketVenue(VenueAdapter):
         return markets
 
     async def _fetch_markets(self) -> list[dict[str, Any]]:
-        base = {
-            "active": "true",
-            "closed": "false",
-            "limit": self.limit,
-        }
-        for params in (
-            {**base, "order": "volume24hr", "ascending": "false"},
-            {**base, "order": "volumeNum", "ascending": "false"},
-            base,
-        ):
-            try:
-                data = await fetch_json(f"{GAMMA_BASE}/markets", params=params, ttl=30)
+        """Fetch the top markets by 24h volume, one page at a time.
+
+        A single page only reaches 100 rows, and the tradable slice of that is
+        the *third* of it that survives the filters below. Paging is what turns
+        a 21-market universe into a 60-market one; it stops as soon as a page
+        comes back short, so a quiet market costs one request, not two.
+        """
+        rows: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for page in range(self.pages):
+            base = {
+                "active": "true",
+                "closed": "false",
+                "limit": self.limit,
+                "offset": page * self.limit,
+            }
+            data = None
+            for params in (
+                {**base, "order": "volume24hr", "ascending": "false"},
+                {**base, "order": "volumeNum", "ascending": "false"},
+                base,
+            ):
+                try:
+                    data = await fetch_json(f"{GAMMA_BASE}/markets", params=params, ttl=30)
+                    break
+                except HttpError:
+                    self._errors += 1
+                    data = None
+            if not data:
                 break
-            except HttpError:
-                self._errors += 1
-                data = None
-        else:
-            return []
-        return _as_objects(data)
+            chunk = _as_objects(data)
+            for item in chunk:
+                key = str(item.get("conditionId") or item.get("id") or "")
+                if key and key in seen:
+                    continue
+                seen.add(key)
+                rows.append(item)
+            if len(chunk) < self.limit:
+                break
+        return rows
 
     def _parse_market(self, item: dict[str, Any]) -> list[Market]:
         outcomes = _json_list(item.get("outcomes"))

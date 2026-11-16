@@ -72,16 +72,19 @@ stale_action = "hold"
 
 # ------------------------------------------------------------------ scanner
 [scanner]
-max_candidates = 24
+max_candidates = 34
 # per-venue quota so one venue cannot crowd out the other
-max_per_venue = 12
+max_per_venue = 20
 min_price = 0.03
 max_price = 0.97
 max_spread_pct = 0.08
 min_liquidity_usd = 3000
 min_hours_to_resolution = 1.0
 
-polymarket_limit = 60
+# Gamma caps one page at 100 rows. limit 100 x pages 2 measured 64 tradable
+# markets against 21 at the old limit of 60 — same filters, same code.
+polymarket_limit = 100
+polymarket_pages = 2
 polymarket_min_liquidity_usd = 5000
 polymarket_min_volume_24h_usd = 10000
 polymarket_max_days_to_resolution = 45
@@ -136,8 +139,8 @@ pumpfun_enrich_top_n = 5
 [signal]
 min_edge = 0.05               # required (fair - ask) / ask
 min_confidence = 0.55
-max_signals_per_tick = 8
-max_signals_per_venue = 4
+max_signals_per_tick = 12
+max_signals_per_venue = 8
 momentum_weight = 0.35
 sentiment_weight = 0.30
 whale_weight = 0.25
