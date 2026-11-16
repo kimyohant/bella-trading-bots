@@ -280,7 +280,8 @@ def _cmd_report(args, cfg: Config) -> int:
 def _cmd_agents() -> int:
     reg = registry()
     print(f"\n  {len(reg)} registered agents\n")
-    for name in ("scanner", "sentiment", "whale", "signal", "risk", "executor", "portfolio"):
+    for name in ("guard", "scanner", "sentiment", "whale", "signal", "risk",
+                 "executor", "portfolio"):
         cls = reg.pop(name, None)
         if cls:
             print(f"  {name:<11} {_summary(cls)}")

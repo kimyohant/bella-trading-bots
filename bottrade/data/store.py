@@ -135,6 +135,18 @@ CREATE TABLE IF NOT EXISTS rejections (
     question TEXT,
     reason TEXT
 );
+
+CREATE TABLE IF NOT EXISTS health (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    tick INTEGER,
+    venue TEXT,
+    ok INTEGER,
+    miss INTEGER,
+    stale_hours REAL,
+    note TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_health_tick ON health(tick);
 """
 
 # Insert column order per table (the autoincrement `id` is never supplied).
@@ -156,6 +168,7 @@ COLUMNS: dict[str, tuple[str, ...]] = {
                   "last_price", "market_value", "unrealized_pnl", "return_pct",
                   "age_hours"),
     "rejections": ("ts", "tick", "agent", "key", "question", "reason"),
+    "health": ("ts", "tick", "venue", "ok", "miss", "stale_hours", "note"),
 }
 
 
@@ -227,6 +240,18 @@ class Store:
 
     def record_event(self, level: str, agent: str, message: str) -> None:
         self._insert("events", (iso(utcnow()), level, agent, message))
+
+    def record_health(self, rows: Iterable[dict[str, Any]], tick: int = 0) -> None:
+        """One row per venue per tick: is this venue's data still arriving?"""
+        ts = iso(utcnow())
+        payload = [
+            (ts, tick, str(r.get("venue", "")), int(r.get("ok", 1)),
+             int(r.get("miss", 0)), round(float(r.get("stale_hours", 0.0)), 4),
+             str(r.get("note", ""))[:120])
+            for r in rows
+        ]
+        if payload:
+            self._insert_many("health", payload)
 
     def record_positions(self, positions: Iterable[Any], tick: int = 0) -> None:
         """Snapshot open positions once per tick so the monitor can show them live."""

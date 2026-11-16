@@ -92,6 +92,23 @@
   }
   .icon-btn:hover { color: var(--text); border-color: var(--accent); }
 
+  /* ---------------------------------------------------------------- health */
+  .health { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  .hchip {
+    display: inline-flex; align-items: center; gap: 7px;
+    padding: 5px 11px; border-radius: 999px;
+    background: var(--panel); border: 1px solid var(--line2);
+    font-size: 12px; font-family: var(--mono); color: var(--muted);
+  }
+  .hchip .dot { width: 6px; height: 6px; }
+  .hchip.fresh .dot { background: var(--pos); }
+  .hchip.quiet { border-color: var(--warn); color: var(--warn); }
+  .hchip.quiet .dot { background: var(--warn); }
+  .hchip.dead { border-color: var(--neg); color: var(--neg); }
+  .hchip.dead .dot { background: var(--neg); }
+  .hnote { font-size: 12px; color: var(--muted); }
+  .hnote.alert { color: var(--neg); font-weight: 500; }
+
   /* ------------------------------------------------------------------ hero */
   .hero {
     display: grid; grid-template-columns: 1.4fr 1fr 1fr; gap: 14px;
@@ -286,6 +303,9 @@
     <span class="pill" id="tick-pill">tick 0</span>
     <button class="icon-btn" id="theme" title="toggle theme">◐</button>
   </div>
+
+  <!-- data health -->
+  <div class="health" id="health" hidden></div>
 
   <!-- hero -->
   <div class="hero">
@@ -512,6 +532,28 @@
     else { dot.classList.add("stopped"); status.textContent = data.ok ? "stopped" : "no data"; }
     el("mode-pill").textContent = "mode " + (m.mode || "—");
     el("tick-pill").textContent = "tick " + (m.tick || 0);
+
+    // data health, written by the guard agent
+    const health = data.health || [];
+    const hBox = el("health");
+    if (!health.length) {
+      hBox.hidden = true;
+    } else {
+      hBox.hidden = false;
+      const chips = health.map((h) => {
+        const tone = h.ok ? "fresh" : "dead";
+        const label = h.ok
+          ? "fresh"
+          : h.stale_hours >= 1
+            ? "quiet " + h.stale_hours.toFixed(1) + "h"
+            : "quiet " + h.miss + "t";
+        return `<span class="hchip ${tone}"><span class="dot"></span>${h.venue} ${label}</span>`;
+      });
+      if (data.deadman) {
+        chips.push('<span class="hnote alert">dead-man switch — no venue data, entries halted</span>');
+      }
+      hBox.innerHTML = chips.join("");
+    }
 
     // hero
     el("equity").textContent = data.ok ? usd(eq.now) : "—";

@@ -2,7 +2,7 @@
 
 Agents are pure stages over a shared `Context`:
 
-    scanner -> sentiment -> whale -> signal -> risk -> executor -> portfolio
+    guard -> scanner -> sentiment -> whale -> signal -> risk -> executor -> portfolio
 
 Adding your own agent is three lines: subclass `Agent`, set `name`, decorate with
 `@register`, then list the name under `[agents] enabled` in `config.toml`.
@@ -147,7 +147,8 @@ def get_agent_class(name: str) -> type[Agent]:
 
 def _load_builtin() -> None:
     """Import built-in agent modules so their decorators run."""
-    for module in ("scanner", "sentiment", "whale", "signal", "risk", "executor", "portfolio"):
+    for module in ("guard", "scanner", "sentiment", "whale", "signal",
+                   "risk", "executor", "portfolio"):
         importlib.import_module(f"{__package__}.{module}")
 
 
@@ -160,7 +161,8 @@ def build_agents(cfg: Config) -> list[Agent]:
 
     names = cfg.list(
         "agents.enabled",
-        ["scanner", "sentiment", "whale", "signal", "risk", "executor", "portfolio"],
+        ["guard", "scanner", "sentiment", "whale", "signal", "risk",
+         "executor", "portfolio"],
     )
     agents: list[Agent] = []
     for name in names:

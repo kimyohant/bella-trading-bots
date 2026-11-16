@@ -65,6 +65,13 @@ class RiskAgent(Agent):
         flip_delta = self.f("thesis_flip_delta", 0.25)
         min_hold = self.f("min_hold_hours", 0.25)
 
+        # Guard publishes which venues have stopped reporting. A fill priced off
+        # a frozen mark is a fiction, so by default we hold rather than invent it
+        # — but a position stranded on a dead venue must not be held forever.
+        stale: set[Any] = ctx.state.get("stale_venues") or set()
+        forced: set[Any] = ctx.state.get("stale_forced") or set()
+        stale_action = self.cfg.s("guard.stale_action", "hold")
+
         # Profit handling. A fixed target alone is not enough: a position that runs
         # to +90% and then reverses must not be allowed to round-trip back to the
         # stop. So we (a) take half off at a first target, (b) trail the rest.
@@ -150,6 +157,17 @@ class RiskAgent(Agent):
             if not reason:
                 continue
 
+            if position.venue in stale and stale_action == "hold":
+                if position.venue not in forced:
+                    ctx.reject(
+                        market,
+                        f"stale-mark: {position.venue.value} quiet, "
+                        f"holding instead of filling {reason}",
+                        agent="risk",
+                    )
+                    continue
+                reason = f"{reason} [stale-forced]"
+
             orders.append(
                 Order(
                     market=market,
@@ -178,7 +196,7 @@ class RiskAgent(Agent):
     # --------------------------------------------------------------- entries
     def _build_entries(self, ctx: Context, equity: float, day_pnl_pct: float) -> list[Order]:
         state = ctx.state
-        if state.get("halted"):
+        if state.get("halted") or state.get("deadman"):
             return []
 
         max_trades_day = self.i("max_trades_per_day", 40)

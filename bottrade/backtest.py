@@ -23,7 +23,11 @@ from .feeds import ReplayFeed
 from .utils import fmt_usd, max_drawdown, stdev, utcnow
 from .venues.paper import PaperBroker
 
-BACKTEST_AGENTS = ["scanner", "signal", "risk", "executor", "portfolio"]
+# The same pipeline the live run uses. Leaving sentiment and whale out made the
+# backtest quietly score a different strategy than the one being traded.
+BACKTEST_AGENTS = [
+    "guard", "scanner", "sentiment", "whale", "signal", "risk", "executor", "portfolio",
+]
 
 
 def write_demo_csv(path: str | Path, ticks: int = 240, seed: int = 11) -> Path:
@@ -68,6 +72,13 @@ async def run_backtest(
     feed = ReplayFeed(cfg, csv_path)
     if len(feed) == 0:
         raise ValueError(f"no usable rows in {csv_path}")
+
+    # The replay universe is whatever the CSV actually contains. Telling the
+    # guard about a venue that never appears in the file would flag it as dead
+    # on every tick for no reason.
+    venues = sorted({m.venue.value for frame in feed.frames for m in frame})
+    if venues:
+        cfg.set("run.venues", venues)
 
     broker = PaperBroker.from_config(cfg)
     if starting_cash is not None:

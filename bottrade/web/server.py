@@ -53,6 +53,8 @@ def build_snapshot(db_path: str | Path, cfg: Config | None = None,
         "rejections": [],
         "venues": [],
         "events": [],
+        "health": [],
+        "deadman": False,
         "stats": {},
     }
     if not path.exists():
@@ -90,6 +92,11 @@ def build_snapshot(db_path: str | Path, cfg: Config | None = None,
             "FROM fills GROUP BY venue ORDER BY venue",
         )
         event_rows = _rows(conn, "SELECT * FROM events ORDER BY id DESC LIMIT 8")
+        health_rows = _rows(
+            conn,
+            "SELECT venue, ok, miss, stale_hours, note FROM health "
+            "WHERE tick = (SELECT MAX(tick) FROM health) ORDER BY venue",
+        )
         totals = _one(
             conn,
             "SELECT COUNT(*) AS fills, "
@@ -154,6 +161,17 @@ def build_snapshot(db_path: str | Path, cfg: Config | None = None,
             for r in venue_rows
         ],
         "events": [_clean(r) for r in event_rows],
+        "health": [
+            {
+                "venue": r["venue"],
+                "ok": bool(r["ok"]),
+                "miss": int(r["miss"] or 0),
+                "stale_hours": round(float(r["stale_hours"] or 0.0), 2),
+                "note": r["note"] or "",
+            }
+            for r in health_rows
+        ],
+        "deadman": bool(health_rows) and not any(r["ok"] for r in health_rows),
         "stats": {
             "fills": int(totals.get("fills") or 0),
             "exits": exits,

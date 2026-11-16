@@ -29,9 +29,23 @@ pumpfun_bps = 250             # bonding curves move against you
 max_bps = 600                 # reject the order beyond this
 
 [agents]
-enabled = ["scanner", "sentiment", "whale", "signal", "risk", "executor", "portfolio"]
+enabled = ["guard", "scanner", "sentiment", "whale", "signal", "risk", "executor", "portfolio"]
 # extra modules that register agents via @register("name") at import time
 custom_modules = []
+
+# -------------------------------------------------------------------- guard
+# Runs first. Watches whether each venue is still answering, because everything
+# downstream assumes the prices are live. See section 3.6 of the README.
+[guard]
+# a venue missing this many consecutive ticks counts as stale
+max_quote_age_ticks = 3
+# no data at all from any venue for this many ticks trips the dead-man switch
+max_empty_ticks = 5
+# after this long, stop waiting and close the position on the last known mark
+max_stale_hours = 6.0
+# hold = never fill against a frozen price (default)
+# liquidate = sell anyway, accepting a made-up fill
+stale_action = "hold"
 
 # ------------------------------------------------------------------ scanner
 [scanner]

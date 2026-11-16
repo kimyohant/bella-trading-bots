@@ -11,12 +11,13 @@
 ## 1. Pipeline
 
 ```
-feed ──► scanner ──► sentiment ──► whale ──► signal ──► risk ──► executor ──► portfolio
-         (universe)  (lexicon/news) (flow)   (edge)    (size/gate) (fills)     (equity/report)
+feed ──► guard ──► scanner ──► sentiment ──► whale ──► signal ──► risk ──► executor ──► portfolio
+         (health)  (universe)  (lexicon/news) (flow)   (edge)    (size/gate) (fills)     (equity/report)
 ```
 
 | agent | หน้าที่ | ไฟล์ |
 |---|---|---|
+| `guard` | เช็คว่า venue ยังส่งข้อมูลอยู่ไหม + dead-man's switch | `agents/guard.py` |
 | `scanner` | กรองตลาดที่เทรดได้ + quota ต่อ venue | `agents/scanner.py` |
 | `sentiment` | ให้คะแนนข้อความ → ปรับ probability (lexicon / RSS / LLM) | `agents/sentiment.py` |
 | `whale` | วัดแรงซื้อ-ขายจาก trade tape / taker counts | `agents/whale.py` |
@@ -100,6 +101,7 @@ python -m bottrade serve --no-run --db state/bottrade.sqlite3   # ดู run เ
 | recent fills | 40 รายการล่าสุด พร้อม flash เมื่อมี fill ใหม่ |
 | latest signals | edge, fair price vs ราคาจริง, confidence bar, เหตุผล |
 | rejections | **ทำไมออเดอร์ถูกปฏิเสธ** — รวม reason ที่คล้ายกันเป็น bucket เดียว |
+| data health | แถบใต้ topbar: venue ไหนสด / ค้างกี่ tick / dead-man's switch |
 
 ทางเทคนิค: `http.server` ของ stdlib ล้วน, bind `127.0.0.1` เท่านั้น, อ่าน sqlite ด้วย read-only
 connection แยกต่อ request (เปิด WAL ไว้) จึงอ่านได้ขณะบอทเขียน โดยไม่บล็อกกัน
@@ -111,6 +113,34 @@ curl http://127.0.0.1:8787/api/snapshot   # JSON ก้อนเดียวจ�
 curl http://127.0.0.1:8787/api/health
 curl -N http://127.0.0.1:8787/api/stream  # SSE
 ```
+
+---
+
+## 3.6 Guard — ตัวที่กล้าพูดว่า "ไม่รู้"
+
+`LiveFeed` กลืน exception ของ venue ที่ล่ม แล้วคืน `[]` เฉย ๆ — ไปป์ไลน์ที่เหลือจึงไม่รู้เลยว่า
+ราคาที่เห็นคือราคาค้าง และ `risk` เคยตัดสินใจขายด้วย `last_price` เดิม (`max-hold` กับ `thesis-decay`
+ไม่ต้องใช้ราคาสดด้วยซ้ำ) นั่นคือวิธีที่บอท book fill ในราคาที่ไม่มีอยู่จริง
+
+`guard` รันเป็นตัวแรกและแก้ตรงจุดนั้น:
+
+| สถานะ | เงื่อนไข | ผล |
+|---|---|---|
+| fresh | venue ส่งข้อมูลทุก tick | ปล่อยผ่าน |
+| stale | ไม่ส่งติดกัน `max_quote_age_ticks` | `risk` **ไม่ยอมขาย** ด้วยราคาค้าง (บันทึก `stale-mark`) |
+| forced | ค้างเกิน `max_stale_hours` | ยอมปิดไม้ที่ราคาล่าสุด เพราะการถือไม้ตายไว้ตลอดกาลแย่กว่า |
+| dead-man | ไม่มี venue ไหนส่งเลย `max_empty_ticks` | halt entries จนกว่าข้อมูลจะกลับมา |
+
+```toml
+[guard]
+max_quote_age_ticks = 3     # ขาดกี่ tick ถึงนับว่าค้าง
+max_empty_ticks = 5         # ไม่มีข้อมูลเลยกี่ tick ถึง trip dead-man
+max_stale_hours = 6.0       # ค้างนานสุดก่อนยอมปิดไม้ที่ราคาล่าสุด
+stale_action = "hold"       # hold = ไม่ยอม fill ปลอม (ค่าเริ่มต้น) | liquidate = ขายเลย
+```
+
+ผลข้างเคียงที่ตั้งใจ: ตอน venue ล่ม ระบบจะ **ไม่ขาย** อะไรเลย แล้วพอ venue กลับมา
+stop-loss/trailing จะยิงทันทีด้วยราคาจริง — ช้ากว่าแต่ซื่อสัตย์กว่า
 
 ---
 
@@ -203,6 +233,9 @@ implement 3 method ใน `bottrade/venues/base.py::VenueAdapter` (`list_markets
 | profit | `risk.trail_giveback_pct` | `0.30` | ถอยจากจุดสูงสุด 30% ของกำไร → ออก |
 | fill | `slippage.pumpfun_bps` | `250` | curve เลื่อนสวนทาง |
 | fill | `fees.pumpfun_fee_bps` | `100` | protocol fee ~1% |
+| health | `guard.max_quote_age_ticks` | `3` | ขาดกี่ tick ถึงนับว่า venue ค้าง |
+| health | `guard.max_empty_ticks` | `5` | ไม่มีข้อมูลเลยกี่ tick ถึง halt |
+| health | `guard.stale_action` | `hold` | ไม่ยอม fill ด้วยราคาค้าง |
 
 override ด้วย env ได้ทุกค่า (ไม่ต้องแก้ไฟล์):
 
@@ -251,8 +284,9 @@ BOTTRADE__RISK__KELLY_FRACTION=0.15 BOTTRADE__SIGNAL__MIN_EDGE=0.08 python -m bo
 python -m unittest discover -s bottrade/tests -t . -v
 ```
 
-39 tests ครอบ: broker fills/fees/slippage/partial, Kelly sizing, ทุก hard gate, exits,
-sentiment lexicon+negation, sqlite logging, report generation, backtest, monitor snapshot API
+54 tests ครอบ: broker fills/fees/slippage/partial, Kelly sizing, ทุก hard gate, exits,
+sentiment lexicon+negation, guard staleness + dead-man's switch + no-fabricated-fills,
+sqlite logging, report generation, backtest, monitor snapshot API
 
 ---
 
@@ -292,7 +326,7 @@ bottrade/
     mock.py               synthetic world
   agents/
     base.py               Context + Agent + registry
-    scanner.py sentiment.py whale.py signal.py risk.py executor.py portfolio.py
+    guard.py scanner.py sentiment.py whale.py signal.py risk.py executor.py portfolio.py
     orchestrator.py       pipeline driver
   data/
     http.py               async fetch + cache + retries (httpx ถ้ามี)

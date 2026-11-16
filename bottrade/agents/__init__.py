@@ -2,6 +2,7 @@
 
 Built-in agents, in pipeline order:
 
+    guard      is each venue still sending data? dead-man's switch
     scanner    build the tradable universe and publish quotes
     sentiment  lexicon / news / LLM probability nudge
     whale      aggressive-flow imbalance from public trade data
