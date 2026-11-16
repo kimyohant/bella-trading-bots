@@ -300,5 +300,153 @@ class TestProfitTaking(unittest.TestCase):
         self.assertNotIn("trailing", ctx.orders[0].reason)
 
 
+    def test_lower_arm_frees_a_slot_sooner(self):
+        # The live symptom: six positions, three of them between +10% and +25%,
+        # none of them reaching the +35% arm — so nothing exited, no slot ever
+        # freed, and 121 entries died at "venue cap" while the money was idle.
+        # Same position, same price: only the arm differs.
+        brk = broker()
+        pos = Position(
+            key="polymarket:tok1", venue=Venue.POLYMARKET, token_id="tok1",
+            question="Q?", qty=100, avg_price=0.40, last_price=0.46,
+            high_water=0.49, opened_at=utcnow(),  # peak +22.5%, now +15%
+        )
+        brk.positions[pos.key] = pos
+
+        tight = self._run(Config({"risk": {
+            "trail_arm_pct": 0.35, "trail_giveback_pct": 0.30,
+            "take_profit_pct": 5.0, "max_hold_hours": 100,
+        }}), broker(), 0.46)
+        self.assertEqual(len(tight.orders), 0, "arm 0.35 must still hold")
+
+        loose = self._run(Config({"risk": {
+            "trail_arm_pct": 0.20, "trail_giveback_pct": 0.30,
+            "take_profit_pct": 5.0, "max_hold_hours": 100,
+        }}), brk, 0.46)
+        self.assertEqual(len(loose.orders), 1, "arm 0.20 must exit")
+        self.assertIn("trailing-stop", loose.orders[0].reason)
+
+
+class TestPerVenueSlotCap(unittest.TestCase):
+    """pump.fun ran out of *slots* while its *budget* was still free.
+
+    Four slots at ~$43 each is $172 against a 30% venue budget of ~$300, so the
+    count limit bound first and the extra capacity was unreachable.
+    """
+
+    def _cfg(self, **risk):
+        base = {
+            "min_edge_after_costs": 0.0,
+            "max_spread_pct": 0.99,
+            "min_liquidity_usd": 0.0,
+            "max_open_positions": 12,
+            "max_positions_per_venue": 4,
+            "max_per_venue_pct": 0.99,
+            "max_total_exposure_pct": 0.99,
+            "cooldown_minutes": 0.0,
+        }
+        base.update(risk)
+        return Config({"risk": base})
+
+    def _open(self, brk, i, venue):
+        key = f"{venue.value}:t{i}"
+        brk.positions[key] = Position(
+            key=key, venue=venue, token_id=f"t{i}", question=f"Q{i}?",
+            qty=100, avg_price=0.5, last_price=0.5, high_water=0.5,
+            opened_at=utcnow(),
+        )
+
+    def _run(self, cfg, brk, venue, question="NEW?"):
+        m = market(price=0.50, bid=0.49, ask=0.51, venue=venue, question=question)
+        ctx = context(cfg, brk)
+        ctx.signals = [Signal(market=m, side=Side.BUY, fair_price=0.90, confidence=0.9)]
+        asyncio.run(RiskAgent(cfg).run(ctx))
+        return ctx
+
+    def test_pumpfun_fifth_and_sixth_slot_are_usable(self):
+        cfg = self._cfg(max_positions_per_venue_pumpfun=6)
+        brk = broker()
+        for i in range(5):
+            self._open(brk, i, Venue.PUMPFUN)
+
+        ctx = self._run(cfg, brk, Venue.PUMPFUN)
+        self.assertEqual(len(ctx.orders), 1, [r["reason"] for r in ctx.rejections])
+
+    def test_pumpfun_default_is_still_four(self):
+        cfg = self._cfg()
+        brk = broker()
+        for i in range(4):
+            self._open(brk, i, Venue.PUMPFUN)
+
+        ctx = self._run(cfg, brk, Venue.PUMPFUN)
+        self.assertEqual(len(ctx.orders), 0)
+        self.assertIn("venue cap: 4 open on pumpfun", [r["reason"] for r in ctx.rejections])
+
+    def test_polymarket_keeps_its_own_count(self):
+        # The override is keyed by venue: giving pump.fun six must not give the
+        # binary book six as well.
+        cfg = self._cfg(max_positions_per_venue_pumpfun=6)
+        brk = broker()
+        for i in range(4):
+            self._open(brk, i, Venue.POLYMARKET)
+
+        ctx = self._run(cfg, brk, Venue.POLYMARKET)
+        self.assertEqual(len(ctx.orders), 0)
+        self.assertIn(
+            "venue cap: 4 open on polymarket", [r["reason"] for r in ctx.rejections]
+        )
+
+    def test_raised_slot_count_still_respects_the_exposure_budget(self):
+        # Slots are not a licence to over-concentrate: the venue budget is what
+        # actually stops the sixth position when the money runs out.
+        cfg = self._cfg(max_positions_per_venue_pumpfun=6, max_per_venue_pct=0.20)
+        brk = broker()
+        for i in range(5):
+            self._open(brk, i, Venue.PUMPFUN)  # $50 each = $250 = 20%+ of equity
+
+        ctx = self._run(cfg, brk, Venue.PUMPFUN)
+        self.assertEqual(len(ctx.orders), 0)
+        self.assertTrue(any("exposure" in r["reason"] for r in ctx.rejections),
+                        [r["reason"] for r in ctx.rejections])
+
+
+class TestShippedConfig(unittest.TestCase):
+    """The three numbers that were the fix, asserted against the real file.
+
+    They are config, not code, so nothing else would catch a silent revert —
+    and all three failed together in a live run: six positions, none of them
+    reaching the +35% trail arm, and 121 entries rejected at "4 open on pumpfun"
+    while the venue's budget was one third unused.
+    """
+
+    def setUp(self):
+        self.cfg = Config.load()
+
+    def test_pumpfun_gets_more_slots_than_the_binary_book(self):
+        base = self.cfg.i("risk.max_positions_per_venue", 4)
+        pumpfun = self.cfg.i("risk.max_positions_per_venue_pumpfun", base)
+        self.assertGreater(
+            pumpfun, base, "pump.fun slots must exceed the shared default"
+        )
+
+    def test_global_counter_does_not_undercut_the_venue_slots(self):
+        # If max_open_positions is smaller than the sum of the venue slots, the
+        # global counter binds first and the extra slots are decorative.
+        base = self.cfg.i("risk.max_positions_per_venue", 4)
+        pumpfun = self.cfg.i("risk.max_positions_per_venue_pumpfun", base)
+        crypto = self.cfg.i("risk.max_crypto_positions", 2)
+        ceiling = self.cfg.i("risk.max_open_positions", 8)
+        self.assertGreaterEqual(
+            ceiling, pumpfun + base + crypto,
+            "max_open_positions must fit pump.fun + Polymarket + crypto",
+        )
+
+    def test_trail_arm_is_reachable(self):
+        arm = self.cfg.f("risk.trail_arm_pct", 0.35)
+        self.assertLessEqual(
+            arm, 0.25, "a +35% arm leaves +10..25% winners locked in a full book"
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

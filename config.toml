@@ -155,8 +155,11 @@ max_position_pct = 0.08
 max_position_usd = 80
 max_total_exposure_pct = 0.45
 max_per_venue_pct = 0.30
-max_open_positions = 8
+max_open_positions = 12
 max_positions_per_venue = 4
+# pump.fun carries its own slot count. Tokens are ~$43 against a 30% venue
+# budget, so four slots ran out while $137 of that budget was still free.
+max_positions_per_venue_pumpfun = 6
 max_spread_pct = 0.06
 # A 15-minute leg trades near 15c, where the minimum 1c tick is already ~7% of
 # price. Judged by the 6% above, every cheap leg is rejected — and the cheap
@@ -178,9 +181,10 @@ cooldown_minutes = 30
 take_profit_partial_pct = 0.60      # first target: sell half
 take_profit_partial_fraction = 0.5  # how much of the position to take off
 
-trail_arm_pct = 0.35                # only start trailing after +35% unrealised
+trail_arm_pct = 0.20                # only start trailing after +20% unrealised
 trail_giveback_pct = 0.30           # exit if it gives back 30% of the peak gain
                                     # (peak +90% -> exits around +63%)
+                                    # (peak +20% -> exits around +14%)
 
 # Polymarket: binary markets that can take weeks to resolve
 stop_loss_pct = 0.35

@@ -308,10 +308,19 @@ class RiskAgent(Agent):
             if len(ctx.broker.positions) + len(orders) >= max_positions:
                 ctx.reject(market, f"max_open_positions ({max_positions})")
                 continue
-            if not is_crypto and venue_positions.get(market.venue, 0) >= max_per_venue_positions:
+            # Slot counts are per venue, not one number for all of them. A
+            # pump.fun token is ~$43 and the venue carries a 30% exposure budget
+            # of its own, so four slots is a *count* limit that bites long before
+            # the money runs out: a live run rejected 121 entries at "4 open on
+            # pumpfun" while $137 of that budget sat unused. Polymarket positions
+            # are ~$37 with a real book behind them, so its four stay as they are.
+            venue_cap = self.i(
+                f"max_positions_per_venue_{market.venue.value}", max_per_venue_positions
+            )
+            if not is_crypto and venue_positions.get(market.venue, 0) >= venue_cap:
                 ctx.reject(
                     market,
-                    f"venue cap: {max_per_venue_positions} open on {market.venue.value}",
+                    f"venue cap: {venue_cap} open on {market.venue.value}",
                 )
                 continue
             if group in open_groups:

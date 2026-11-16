@@ -344,13 +344,15 @@ implement 3 method ใน `bottrade/venues/base.py::VenueAdapter` (`list_markets
 | size | `risk.max_position_pct` | `0.08` | ไม่เกิน 8% ของ equity ต่อโพซิชัน |
 | risk | `risk.daily_loss_limit_pct` | `0.08` | ขาดทุน 8%/วัน = หยุดเปิดออเดอร์ใหม่ |
 | risk | `risk.max_positions_per_venue` | `4` | กันกระจุกตัวในเจ้าเดียว (ไม่นับ crypto) |
+| risk | `risk.max_positions_per_venue_pumpfun` | `6` | ช่องของ pump.fun แยกจาก Polymarket |
+| risk | `risk.max_open_positions` | `12` | ต้อง ≥ pumpfun + polymarket + crypto ไม่งั้นช่องที่เพิ่มมาไม่ได้ใช้ |
 | risk | `risk.crypto_max_spread_pct` | `0.08` | leg 15 นาทีราคาต่ำ spread 1c = ~7% |
 | exit | `risk.stop_loss_pct` | `0.35` | binary market |
 | exit | `risk.stop_loss_pct_token` | `0.25` | memecoin (ผันผวนกว่า) |
 | exit | `risk.max_hold_hours_token` | `2.0` | memecoin ไม่ควรถือ 24 ชม. |
 | profit | `risk.take_profit_partial_pct` | `0.60` | ถึง +60% ขายครึ่งแรก |
 | profit | `risk.take_profit_partial_fraction` | `0.5` | สัดส่วนที่ขายตอนถึงเป้าแรก |
-| profit | `risk.trail_arm_pct` | `0.35` | เริ่ม trailing หลังกำไร +35% |
+| profit | `risk.trail_arm_pct` | `0.20` | เริ่ม trailing หลังกำไร +20% (เดิม 0.35 ทำให้ไม้ +10–25% ค้างเต็ม book) |
 | profit | `risk.trail_giveback_pct` | `0.30` | ถอยจากจุดสูงสุด 30% ของกำไร → ออก |
 | fill | `slippage.pumpfun_bps` | `250` | curve เลื่อนสวนทาง |
 | fill | `fees.pumpfun_fee_bps` | `100` | protocol fee ~1% |
@@ -412,12 +414,13 @@ BOTTRADE__RISK__KELLY_FRACTION=0.15 BOTTRADE__SIGNAL__MIN_EDGE=0.08 python -m bo
 python -m unittest discover -s bottrade/tests -t . -v
 ```
 
-100 tests ครอบ: broker fills/fees/slippage/partial, Kelly sizing, ทุก hard gate, exits,
+108 tests ครอบ: broker fills/fees/slippage/partial, Kelly sizing, ทุก hard gate, exits,
 sentiment lexicon+negation, guard staleness + dead-man's switch + no-fabricated-fills,
 crypto fair value + basis gate + risk profile + spread/venue isolation จาก binary book,
 delisted-token write-off (vs. feed outage),
 429 host cooldown (fail-fast ไม่ยิงซ้ำ) + DexScreener fallback + การ re-mark โพซิชันที่หลุด quota,
 dashboard ที่ตาม run ล่าสุดได้แม้ tick counter จะเริ่มใหม่ที่ 1,
+ช่องต่อ venue (pump.fun 6 / polymarket 4) + trail arm ที่เอื้อมถึง,
 sqlite logging, report generation, backtest, monitor snapshot API
 
 ---
