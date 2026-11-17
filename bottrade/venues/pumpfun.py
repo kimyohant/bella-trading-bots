@@ -89,6 +89,9 @@ class PumpFunVenue(VenueAdapter):
         # snipeable for 8 minutes, so seeing the same snapshot for 45s still
         # catches every launch with room to spare.
         self.new_pool_ttl = cfg.i("sniper.feed_ttl_seconds", 45)
+        # Prices come from a different host than discovery, so they can be fresher
+        # than the list they belong to without costing any GeckoTerminal quota.
+        self.price_ttl = cfg.i("scanner.pumpfun_price_ttl_seconds", 15)
         self.source = "none"
         self._last_source: str | None = None
         self._sol_price: float | None = None
@@ -118,6 +121,11 @@ class PumpFunVenue(VenueAdapter):
             reverse=True,
         )
         markets = markets[: self.limit]
+        # The pool list is cached for 90s to stop it eating the monthly quota, but
+        # a memecoin's price is not a 90-second quantity: the bot would size and
+        # fill against a price nobody can trade. Refresh the prices of the names
+        # it actually picked from a different host — one batched call.
+        await self._refresh_prices(markets)
         self._flow = {
             m.key: {
                 "buys": m.meta.get("buys_24h", 0.0),
@@ -226,6 +234,46 @@ class PumpFunVenue(VenueAdapter):
             market.meta["profile"] = SNIPER_PROFILE
             out.append(market)
         return out
+
+    async def _refresh_prices(self, markets: list[Market]) -> None:
+        """Overwrite `price/bid/ask` with a fresh batch quote, if one arrives.
+
+        DexScreener prices a list of mints in one request on a host with its own
+        budget, so the expensive discovery call can stay cached without the marks
+        going stale. Any failure leaves the cached prices in place: a stale mark
+        is worse than a fresh one and better than none.
+        """
+        mints = [m.token_id for m in markets if m.token_id][:30]
+        if not mints:
+            return
+        try:
+            payload = await fetch_json(
+                f"{DEXSCREENER_API}/tokens/v1/solana/{','.join(mints)}",
+                ttl=self.price_ttl,
+                retries=0,
+            )
+        except HttpError:
+            return
+        rows = payload if isinstance(payload, list) else []
+        fresh: dict[str, float] = {}
+        for pair in rows:
+            if not isinstance(pair, dict):
+                continue
+            mint = str((pair.get("baseToken") or {}).get("address") or "")
+            price = _num(pair.get("priceUsd"))
+            if mint and price > 0:
+                fresh[mint] = price
+        if not fresh:
+            return
+
+        half = self.spread_bps / 10_000.0 / 2.0
+        for market in markets:
+            price = fresh.get(market.token_id)
+            if not price:
+                continue
+            market.price = price
+            market.bid = price * (1.0 - half)
+            market.ask = price * (1.0 + half)
 
     async def _dexscreener_pools(self) -> list[dict[str, Any]]:
         """Last resort, and a different host — which is the whole point.

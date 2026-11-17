@@ -250,6 +250,58 @@ class TestDiscoveryQuota(unittest.TestCase):
         self.assertGreaterEqual(cfg.i("sniper.feed_ttl_seconds", 15), 30)
 
 
+class TestFreshMarks(unittest.TestCase):
+    """A 90s discovery cache must not turn into 90s-old prices.
+
+    The bot sizes and fills against `market.ask`; if that number is a minute and a
+    half old it is not a mark, it is a memory. Prices are refreshed from a
+    different host so the expensive list can stay cached.
+    """
+
+    def _venue(self):
+        return PumpFunVenue(Config({"scanner": {"pumpfun_price_ttl_seconds": 15,
+                                               "pumpfun_spread_bps": 200}}))
+
+    def test_a_batch_quote_overwrites_the_cached_price(self):
+        venue = self._venue()
+        m = launch("AAA", price=1e-5, token="aaa")
+
+        async def fake_fetch(url, **kwargs):
+            self.assertIn("tokens/v1/solana/aaa", url)
+            return [{"baseToken": {"address": "aaa"}, "priceUsd": "0.00002"}]
+
+        with patch("bottrade.venues.pumpfun.fetch_json", new=fake_fetch):
+            asyncio.run(venue._refresh_prices([m]))
+
+        self.assertAlmostEqual(m.price, 2e-5)
+        self.assertLess(m.bid, m.price)
+        self.assertGreater(m.ask, m.price)
+
+    def test_a_dead_quote_leaves_the_price_alone(self):
+        venue = self._venue()
+        m = launch("AAA", price=1e-5, token="aaa")
+
+        async def fake_fetch(url, **kwargs):
+            raise HttpError("429")
+
+        with patch("bottrade.venues.pumpfun.fetch_json", new=fake_fetch):
+            asyncio.run(venue._refresh_prices([m]))
+
+        self.assertAlmostEqual(m.price, 1e-5)
+
+    def test_a_quote_for_someone_else_is_ignored(self):
+        venue = self._venue()
+        m = launch("AAA", price=1e-5, token="aaa")
+
+        async def fake_fetch(url, **kwargs):
+            return [{"baseToken": {"address": "zzz"}, "priceUsd": "9.0"}]
+
+        with patch("bottrade.venues.pumpfun.fetch_json", new=fake_fetch):
+            asyncio.run(venue._refresh_prices([m]))
+
+        self.assertAlmostEqual(m.price, 1e-5)
+
+
 class TestLaunchGates(unittest.TestCase):
     """Each gate below is a shape that loses money if it is let through."""
 

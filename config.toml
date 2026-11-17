@@ -136,6 +136,9 @@ pumpfun_fallback_allow_graduated = true
 # 24h ranking — 90s is still fresher than the number being ranked.
 pumpfun_ttl_seconds = 90
 pumpfun_pages = 2
+# The cached list must not become stale marks: prices for the names actually
+# picked are refreshed in one batched call on a different host (DexScreener).
+pumpfun_price_ttl_seconds = 15
 
 # 15-minute crypto markets are a different size of business: ~$1k of liquidity is
 # normal, and a 1c spread on a 50c contract is tight, not wide.
