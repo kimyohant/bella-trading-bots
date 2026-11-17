@@ -15,6 +15,9 @@ from .utils import hours_between, utcnow
 
 # Market families that need their own risk profile and pricing model.
 CRYPTO_PROFILE = "crypto_updown"
+# A token in its first minutes has no history to price, so it cannot be judged
+# by the same model as a market that has been trading for days.
+SNIPER_PROFILE = "sniper_launch"
 
 
 class Venue(str, Enum):

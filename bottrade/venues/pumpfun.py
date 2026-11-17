@@ -26,7 +26,7 @@ from typing import Any
 
 from ..config import Config
 from ..data.http import HttpError, fetch_json
-from ..models import Market, Quote, Venue
+from ..models import SNIPER_PROFILE, Market, Quote, Venue
 from ..utils import clamp, parse_ts, utcnow
 from .base import VenueAdapter
 
@@ -59,6 +59,15 @@ class PumpFunVenue(VenueAdapter):
         self.min_age = cfg.f("scanner.pumpfun_min_age_minutes", 3)
         self.max_age = cfg.f("scanner.pumpfun_max_age_minutes", 720)
         self.include_complete = cfg.b("scanner.pumpfun_include_complete", False)
+        # Which dex ids count as "a pump.fun launch" in the network-wide
+        # new-pools feed. In a typical poll the feed is 13 pump-fun + 3 pumpswap
+        # + 4 Meteora, so this filter is what makes it a pump.fun feed at all.
+        self.new_pool_dexes = [
+            str(d).strip()
+            for d in cfg.list("scanner.pumpfun_new_pool_dexes",
+                              ["pumpfun", "pump-fun", "pumpswap"])
+            if str(d).strip()
+        ]
         # DexScreener only indexes tokens that already have a DEX pair, so
         # essentially everything it returns has graduated off the bonding curve.
         # Excluding those would leave the fallback with ~1 candidate and the
@@ -168,6 +177,46 @@ class PumpFunVenue(VenueAdapter):
             out.extend(item for item in data if isinstance(item, dict))
         return out
 
+    async def new_pools(self, limit: int = 20) -> list[Market]:
+        """Pools created in roughly the last minute, newest first.
+
+        `/new_pools` is a network-wide feed, so the pump.fun filter has to be
+        applied on the relationship rather than in the URL: in a typical poll 16
+        of 20 rows are pump.fun (13 pump-fun + 3 pumpswap) and the rest are
+        Meteora. Ordering is by creation time, which is the only ordering that
+        matters here — by the time a launch ranks by volume it is not a launch.
+        """
+        try:
+            payload = await fetch_json(
+                f"{GECKO_BASE}/networks/solana/new_pools",
+                params={"page": 1},
+                ttl=15,
+                retries=1,
+            )
+        except HttpError:
+            return []
+        rows = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(rows, list):
+            return []
+
+        wanted = {str(d).strip() for d in self.new_pool_dexes if str(d).strip()}
+        out: list[Market] = []
+        for pool in rows[: max(1, limit)]:
+            if not isinstance(pool, dict):
+                continue
+            dex = (
+                ((pool.get("relationships") or {}).get("dex") or {}).get("data") or {}
+            ).get("id")
+            if wanted and dex not in wanted:
+                continue
+            market = self._parse_gecko(pool)
+            if market is None:
+                continue
+            market.meta["dex"] = dex
+            market.meta["profile"] = SNIPER_PROFILE
+            out.append(market)
+        return out
+
     async def _dexscreener_pools(self) -> list[dict[str, Any]]:
         """Last resort, and a different host — which is the whole point.
 
@@ -247,6 +296,11 @@ class PumpFunVenue(VenueAdapter):
         volume = _num((attrs.get("volume_usd") or {}).get("h24"))
         liquidity = _num(attrs.get("reserve_in_usd"))
         txns = (attrs.get("transactions") or {}).get("h24") or {}
+        # A pool that is ninety seconds old reports the same numbers in every
+        # window, so h24 is not a 24-hour figure — it is "since launch". Keep
+        # the five-minute slice separately: for a launch that is the only
+        # window that describes the crowd rather than the token's whole life.
+        m5 = (attrs.get("transactions") or {}).get("m5") or {}
         changes = attrs.get("price_change_percentage") or {}
 
         raw_name = str(attrs.get("name") or "")
@@ -274,6 +328,10 @@ class PumpFunVenue(VenueAdapter):
                 "buys_24h": _num(txns.get("buys")),
                 "sells_24h": _num(txns.get("sells")),
                 "buyers_24h": _num(txns.get("buyers")),
+                "buys_m5": _num(m5.get("buys")),
+                "sells_m5": _num(m5.get("sells")),
+                "buyers_m5": _num(m5.get("buyers")),
+                "sellers_m5": _num(m5.get("sellers")),
                 "change_m5": _num(changes.get("m5")),
                 "change_h1": _num(changes.get("h1")),
                 "change_h24": _num(changes.get("h24")),

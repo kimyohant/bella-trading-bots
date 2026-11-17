@@ -7,7 +7,7 @@ pointed at a live adapter later without any agent changing.
 
 from __future__ import annotations
 
-from ..models import CRYPTO_PROFILE, Side
+from ..models import CRYPTO_PROFILE, SNIPER_PROFILE, Side
 from ..utils import fmt_price, utcnow
 from ..venues.paper import OrderRejected
 from .base import Agent, Context, register
@@ -50,6 +50,12 @@ class ExecutorAgent(Agent):
                         # cannot eat the trades the rest of the book needs
                         ctx.state["crypto_trades_today"] = (
                             ctx.state.get("crypto_trades_today", 0) + 1
+                        )
+                    elif position.profile == SNIPER_PROFILE:
+                        # launches are a lottery ticket, so they get their own
+                        # daily count instead of eating the main book's 40
+                        ctx.state["sniper_trades_today"] = (
+                            ctx.state.get("sniper_trades_today", 0) + 1
                         )
             else:
                 # a sell that leaves a remainder means we took partial profit;

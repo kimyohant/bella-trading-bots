@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import math
 from collections import deque
-from ..models import CRYPTO_PROFILE, Market, Side, Signal, Venue
+from ..models import CRYPTO_PROFILE, SNIPER_PROFILE, Market, Side, Signal, Venue
 from ..utils import clamp, fmt_price, mean, sigmoid
 from .base import Agent, Context, register
 
@@ -50,6 +50,12 @@ class SignalAgent(Agent):
                 crypto_signal = self._crypto_signal(ctx, market)
                 if crypto_signal is not None:
                     signals.append(crypto_signal)
+                continue
+
+            # A launch in its first minutes has no history to nudge: momentum
+            # needs four points and the token has none. The sniper agent prices
+            # these from buyer breadth instead, so leave them alone here.
+            if market.meta.get("profile") == SNIPER_PROFILE:
                 continue
 
             components: dict[str, float] = {}

@@ -11,8 +11,8 @@
 ## 1. Pipeline
 
 ```
-feed ──► guard ──► scanner ──► sentiment ──► whale ──► crypto ──► signal ──► risk ──► executor ──► portfolio
-         (health)  (universe)  (lexicon/news) (flow)   (spot)     (edge)    (size/gate) (fills)     (equity/report)
+feed ──► guard ──► scanner ──► sentiment ──► whale ──► crypto ──► signal ──► sniper ──► risk ──► executor ──► portfolio
+         (health)  (universe)  (lexicon/news) (flow)   (spot)     (edge)    (launch)   (size/gate) (fills)     (equity/report)
 ```
 
 | agent | หน้าที่ | ไฟล์ |
@@ -23,6 +23,7 @@ feed ──► guard ──► scanner ──► sentiment ──► whale ─�
 | `whale` | วัดแรงซื้อ-ขายจาก trade tape / taker counts | `agents/whale.py` |
 | `crypto` | fair probability ของตลาด 15 นาที จากราคา spot จริง | `agents/crypto.py` |
 | `signal` | รวมสัญญาณเป็น "fair price" แล้วคัดเฉพาะที่มี edge | `agents/signal.py` |
+| `sniper` | เหรียญเปิดใหม่ไม่กี่นาที: วัด breadth ของฝูงชน (ดู 3.8) | `agents/sniper.py` |
 | `risk` | exit (stop/target/time/decay) + hard gate + position sizing | `agents/risk.py` |
 | `executor` | ส่งออเดอร์เข้า broker เท่านั้น | `agents/executor.py` |
 | `portfolio` | mark-to-market + บันทึก equity ลง sqlite | `agents/portfolio.py` |
@@ -249,6 +250,73 @@ crypto_max_spread_pct = 0.08        # ต้อง >= scanner.crypto_max_spread_
 basis ระหว่างสองเจ้าคือความเสี่ยงจริงของ strategy นี้, ตลาดพวกนี้บาง (liquidity $1k–$12k)
 และ spread 1c บนสัญญา 50c = 2% ต่อขา ซึ่งกิน edge ไปแล้วครึ่งหนึ่งถ้าออกเร็ว
 ผมจึงตั้ง `max_position_usd_crypto` ไว้เตี้ย ๆ และให้มันเทรดเฉพาะตอนที่สัญญาณแรงจริง
+
+---
+
+## 3.8 Sniper — นาทีแรกของเหรียญเปิดใหม่
+
+ทุก agent ที่เหลือใน pipeline ต้องการ "ประวัติ" ก่อนจะพูดอะไรได้: scanner จัดอันดับด้วย volume
+24 ชั่วโมง, signal ต้องการ momentum 4 จุด, risk profile ถูกออกแบบมาสำหรับถือเป็นชั่วโมง
+เหรียญที่อายุ 90 วินาทีไม่มีอะไรพวกนี้เลย → **มันจึงไม่เคยเข้าคิว** และกว่าจะเข้า งานเปิดตัวก็จบแล้ว
+
+`bottrade/agents/sniper.py` อ่านอีกปลายของเส้นโค้ง: `/networks/solana/new_pools`
+กรองเฉพาะ pump.fun (dex relationship ไม่ใช่ URL — feed นี้เป็นของทั้งเครือข่าย) แล้วถามคำถามเดียว
+
+> **ฝูงชนกำลังก่อตัว หรือมีกระเป๋าเดียวกำลังคุยกับตัวเอง?**
+
+วัดจาก feed จริงตอนเขียนโค้ด (1 poll = 17 pool, ทุกตัวอายุ ~2 นาที):
+
+| token | liq | buyers 5m | buys/sells | chg 5m | ผล |
+|---|---|---|---|---|---|
+| Democat | $29,095 | 96 | 96/13 = 7.4x | +13.1% | **ผ่าน** |
+| Balls | $2,175 | 18 | 33/18 = 1.8x | +34.7% | liq ต่ำ + buyers น้อย |
+| MR | $625 | 13 | 72/65 = 1.1x | −75.7% | กำลังทิ้ง |
+| $HEIST | $1,590 | 1 | 1/0 | 0.0% | กระเป๋าเดียว |
+| df | $128 | 29 | 54/52 = 1.0x | −99.3% | rug แล้ว |
+
+**1 จาก 17 ผ่าน** — ความหายากนี้คือธรรมชาติของงาน ไม่ใช่ bug ถ้า poll ไหนได้ 0 ตัวก็ปกติ
+
+**Gate** (`[sniper]` ใน `config.toml`):
+
+| gate | ค่า | เหตุผล |
+|---|---|---|
+| `max_age_minutes` | 8 | เกินนี้ไม่ใช่ launch แล้ว |
+| `min_liquidity_usd` | 3,000 | ต่ำกว่านี้เส้นโค้งยังเป็นกระเป๋าเดียว |
+| `min_buyers_m5` | 25 | breadth คือหลักฐานเดียวที่มีใน 2 นาทีแรก |
+| `min_buy_sell_ratio` | 1.1 | buys/sells ต้องเอียงไปทางซื้อ |
+| `min/max_change_m5` | −15% … +60% | กำลังทิ้ง = ไม่เอา / ชันเกิน = อย่าไปเป็น exit liquidity |
+| `min_fdv_usd` | 8,000–250,000 | เล็กเกินไป manip ง่าย, ใหญ่เกินไปคือไล่ราคา |
+| `min_edge` | 0.12 | round-trip cost ~3.5% กิน edge ต่ำกว่านี้หมด |
+| `cooldown_minutes` | 60 | mint เดิมไม่ซ้ำภายในชั่วโมง |
+
+**Edge มาจากไหน** — ไม่มีโมเดลราคา เพราะไม่มีประวัติให้ fit สิ่งที่ให้ได้คือ breadth + pressure:
+
+```
+breadth  = clamp(buyers / (min_buyers × 4), 0, 1)      # 25 คน = 0, 100 คน = 1
+pressure = clamp(buys/sells − 1, 0, 2)
+edge     = clamp(0.04 + 0.08·pressure + 0.08·breadth, 0, 0.28)
+```
+
+25 buyers ที่ buys/sells = 1:1 คือ noise (edge 4%) — 100 buyers ที่ 4x คือฝูงชน (edge 28%)
+
+**Book แยก** — ต่างจาก crypto 15 นาที:
+
+```toml
+[risk]
+max_sniper_positions = 2
+max_sniper_trades_per_day = 15
+max_position_usd_sniper = 15
+stop_loss_pct_sniper = 0.35
+take_profit_pct_sniper = 1.5
+max_hold_minutes_sniper = 20        # นาฬิกาคือ thesis
+```
+
+$15 สองใบ = 3% ของพอร์ต $1,000 — **snipe ไม่กิน slot ของ pump.fun** เพราะไม่เช่นนั้นตั๋ว $15
+จะไปแทนที่ไม้ $43 ที่โมเดลคำนวณราคาจริง ๆ (บั๊กเดียวกับที่ crypto เคยเป็น — ดู 3.7 ข้อ 2)
+
+**ข้อควรรู้** — feed สาธารณะ *มองไม่เห็น* สิ่งที่ตัดสินจริง: dev wallet ถือกี่ %, bundled buys,
+freeze authority, หรือ "96 buyers" เป็น cluster เดียวหรือเปล่า ตัวเลขที่เห็นคือ breadth เท่านั้น
+นี่จึงเป็นตั๋ว lottery ที่มีขนาดจำกัดและมีนาฬิกา ไม่ใช่ edge ที่พิสูจน์แล้ว
 
 ---
 

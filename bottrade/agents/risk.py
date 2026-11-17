@@ -16,7 +16,16 @@ from __future__ import annotations
 from datetime import date
 from typing import Any
 
-from ..models import CRYPTO_PROFILE, Market, Order, Position, Side, Signal, Venue
+from ..models import (
+    CRYPTO_PROFILE,
+    SNIPER_PROFILE,
+    Market,
+    Order,
+    Position,
+    Side,
+    Signal,
+    Venue,
+)
 from ..utils import clamp, utcnow
 from .base import Agent, Context, register
 
@@ -106,6 +115,14 @@ class RiskAgent(Agent):
             self.f("take_profit_pct_crypto", 1.0),
             self.f("max_hold_minutes_crypto", 10.0) / 60.0,
         )
+        # A snipe is a different trade: the thesis is "this crowd is real for the
+        # next twenty minutes", so the clock is the thesis. Holding a launch for
+        # two hours is not patience, it is a different position with no reason.
+        sniper = (
+            self.f("stop_loss_pct_sniper", 0.35),
+            self.f("take_profit_pct_sniper", 1.5),
+            self.f("max_hold_minutes_sniper", 20.0) / 60.0,
+        )
         exit_seconds = self.f("exit_seconds_before_window", 120.0)
 
         orders: list[Order] = []
@@ -126,6 +143,12 @@ class RiskAgent(Agent):
             )
             if is_crypto:
                 stop_loss, take_profit, max_hold = crypto
+            is_sniper = (
+                market.meta.get("profile") == SNIPER_PROFILE
+                or position.profile == SNIPER_PROFILE
+            )
+            if is_sniper:
+                stop_loss, take_profit, max_hold = sniper
             reason = None
             qty_fraction = 1.0
             ret = position.return_pct
@@ -272,10 +295,19 @@ class RiskAgent(Agent):
         venue_exposure: dict[Venue, float] = {venue: 0.0 for venue in Venue}
         crypto_positions = 0
         crypto_exposure = 0.0
+        sniper_positions = 0
+        sniper_exposure = 0.0
         for position in ctx.broker.positions.values():
             if position.profile == CRYPTO_PROFILE:
                 crypto_positions += 1
                 crypto_exposure += position.market_value
+                continue
+            # A snipe is a pump.fun position, but it must not spend the pump.fun
+            # book's six slots: a $15 lottery ticket would then displace a $43
+            # position that the model actually priced.
+            if position.profile == SNIPER_PROFILE:
+                sniper_positions += 1
+                sniper_exposure += position.market_value
                 continue
             venue_positions[position.venue] = venue_positions.get(position.venue, 0) + 1
             venue_exposure[position.venue] = (
@@ -292,10 +324,22 @@ class RiskAgent(Agent):
         # instead of borrowing Polymarket's 30%.
         crypto_room = max_crypto_positions * max_position_usd_crypto - crypto_exposure
 
+        # The sniper book is deliberately tiny and separate. Two tickets of $15
+        # against a $1000 book is 3% at risk on a coin flip with a twenty-minute
+        # clock — sized to be survivable when most launches go to zero, which is
+        # the only sizing that makes sense for this trade.
+        max_sniper_positions = self.i("max_sniper_positions", 2)
+        max_sniper_trades = self.i("max_sniper_trades_per_day", 15)
+        max_position_usd_sniper = self.f("max_position_usd_sniper", 15.0)
+        sniper_trades = int(state.get("sniper_trades_today", 0))
+        sniper_added = 0
+        sniper_room = max_sniper_positions * max_position_usd_sniper - sniper_exposure
+
         for signal in ctx.signals:
             market = signal.market
             group = (market.venue, market.question)
             is_crypto = market.meta.get("profile") == CRYPTO_PROFILE
+            is_sniper = market.meta.get("profile") == SNIPER_PROFILE
 
             if is_crypto:
                 if crypto_positions + crypto_added >= max_crypto_positions:
@@ -303,6 +347,14 @@ class RiskAgent(Agent):
                     continue
                 if crypto_trades + crypto_added >= max_crypto_trades:
                     ctx.reject(market, f"crypto cap: {max_crypto_trades} trades today")
+                    continue
+
+            if is_sniper:
+                if sniper_positions + sniper_added >= max_sniper_positions:
+                    ctx.reject(market, f"sniper cap: {max_sniper_positions} open")
+                    continue
+                if sniper_trades + sniper_added >= max_sniper_trades:
+                    ctx.reject(market, f"sniper cap: {max_sniper_trades} trades today")
                     continue
 
             if len(ctx.broker.positions) + len(orders) >= max_positions:
@@ -317,7 +369,7 @@ class RiskAgent(Agent):
             venue_cap = self.i(
                 f"max_positions_per_venue_{market.venue.value}", max_per_venue_positions
             )
-            if not is_crypto and venue_positions.get(market.venue, 0) >= venue_cap:
+            if not is_crypto and not is_sniper and venue_positions.get(market.venue, 0) >= venue_cap:
                 ctx.reject(
                     market,
                     f"venue cap: {venue_cap} open on {market.venue.value}",
@@ -356,6 +408,8 @@ class RiskAgent(Agent):
                 # a coin flip with a 15-minute clock does not deserve a full
                 # Kelly slice, however good the number looks
                 size_usd = min(size_usd, max_position_usd_crypto)
+            if is_sniper:
+                size_usd = min(size_usd, max_position_usd_sniper)
             if size_usd <= 0:
                 ctx.reject(market, "size resolved to zero")
                 continue
@@ -364,6 +418,8 @@ class RiskAgent(Agent):
             room_total = equity * max_total - total_exposure
             if is_crypto:
                 room_venue = crypto_room
+            elif is_sniper:
+                room_venue = sniper_room
             else:
                 room_venue = equity * max_venue - venue_exposure.get(market.venue, 0.0)
             room_cash = ctx.broker.cash * 0.95
@@ -402,6 +458,9 @@ class RiskAgent(Agent):
             if is_crypto:
                 crypto_added += 1
                 crypto_room -= notional
+            elif is_sniper:
+                sniper_added += 1
+                sniper_room -= notional
             else:
                 venue_exposure[market.venue] = venue_exposure.get(market.venue, 0.0) + notional
                 venue_positions[market.venue] = venue_positions.get(market.venue, 0) + 1

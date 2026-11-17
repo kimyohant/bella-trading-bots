@@ -148,7 +148,7 @@ def get_agent_class(name: str) -> type[Agent]:
 def _load_builtin() -> None:
     """Import built-in agent modules so their decorators run."""
     for module in ("guard", "scanner", "sentiment", "whale", "crypto", "signal",
-                   "risk", "executor", "portfolio"):
+                   "sniper", "risk", "executor", "portfolio"):
         importlib.import_module(f"{__package__}.{module}")
 
 
@@ -162,7 +162,7 @@ def build_agents(cfg: Config) -> list[Agent]:
     names = cfg.list(
         "agents.enabled",
         ["guard", "scanner", "sentiment", "whale", "crypto", "signal",
-         "risk", "executor", "portfolio"],
+         "sniper", "risk", "executor", "portfolio"],
     )
     agents: list[Agent] = []
     for name in names:

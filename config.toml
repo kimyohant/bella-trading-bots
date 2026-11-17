@@ -29,9 +29,34 @@ pumpfun_bps = 250             # bonding curves move against you
 max_bps = 600                 # reject the order beyond this
 
 [agents]
-enabled = ["guard", "scanner", "sentiment", "whale", "crypto", "signal", "risk", "executor", "portfolio"]
+enabled = ["guard", "scanner", "sentiment", "whale", "crypto", "signal", "sniper", "risk", "executor", "portfolio"]
 # extra modules that register agents via @register("name") at import time
 custom_modules = []
+
+# ------------------------------------------------------------------- sniper
+# The first minutes of a pump.fun launch. Everything else in the pipeline needs
+# a history to price; a token that is 90 seconds old has none, so it never
+# reaches the book. This agent reads the new-pools feed and asks one question:
+# is a crowd forming, or is one wallet talking to itself?
+#
+# Measured on the live feed: of 20 pools created in the last minute, 16 are
+# pump.fun, and most have 1-3 buyers. A poll typically yields 0-2 candidates —
+# that rarity is the point, not a bug.
+[sniper]
+enabled = true
+max_age_minutes = 8.0         # older than this is not a launch any more
+min_liquidity_usd = 3000      # below this the curve is still one wallet
+min_buyers_m5 = 25            # distinct buyers in the first minutes
+min_buy_sell_ratio = 1.1      # buys / max(sells, 1)
+min_change_m5 = -15.0         # already dumping this hard: skip
+max_change_m5 = 60.0          # already vertical: do not be the exit liquidity
+min_fdv_usd = 8000
+max_fdv_usd = 250000
+max_candidates = 2            # per tick
+feed_limit = 20               # rows read from new_pools
+cooldown_minutes = 60         # do not re-snipe the same mint
+min_edge = 0.12               # below this the 3.5% round-trip cost eats it
+signal_ttl_seconds = 120
 
 # ------------------------------------------------------------------- crypto
 # Polymarket's 15-minute BTC/ETH/XRP "Up or Down" markets: "Up" if the price at
@@ -158,7 +183,7 @@ max_position_pct = 0.08
 max_position_usd = 80
 max_total_exposure_pct = 0.45
 max_per_venue_pct = 0.30
-max_open_positions = 12
+max_open_positions = 14
 max_positions_per_venue = 4
 # pump.fun carries its own slot count. Tokens are ~$43 against a 30% venue
 # budget, so four slots ran out while $137 of that budget was still free.
@@ -183,6 +208,13 @@ cooldown_minutes = 30
 # hard target as the outer bound.
 take_profit_partial_pct = 0.60      # first target: sell half
 take_profit_partial_fraction = 0.5  # how much of the position to take off
+
+# --- sniping ----------------------------------------------------------------
+# Two tickets of $15 against a $1000 book. Sized to be survivable when most
+# launches go to zero; the 20-minute clock *is* the thesis.
+max_sniper_positions = 2
+max_sniper_trades_per_day = 15
+max_position_usd_sniper = 15
 
 trail_arm_pct = 0.20                # only start trailing after +20% unrealised
 trail_giveback_pct = 0.30           # exit if it gives back 30% of the peak gain
@@ -217,6 +249,13 @@ exit_seconds_before_window = 120    # be flat this long before resolution
 max_crypto_positions = 2            # separate from max_positions_per_venue
 max_crypto_trades_per_day = 24      # so crypto cannot eat the whole daily budget
 max_position_usd_crypto = 40
+
+# A snipe is a different trade: the thesis is "this crowd is real for the next
+# twenty minutes", so the clock *is* the thesis. Holding a launch for two hours
+# is not patience, it is a different position with no reason behind it.
+stop_loss_pct_sniper = 0.35
+take_profit_pct_sniper = 1.5
+max_hold_minutes_sniper = 20
 
 # ------------------------------------------------------------------- report
 [report]
