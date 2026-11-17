@@ -79,6 +79,16 @@ class PumpFunVenue(VenueAdapter):
         self.spread_bps = cfg.f("scanner.pumpfun_spread_bps", 200)
         self.sol_fallback = cfg.f("scanner.pumpfun_sol_price_fallback", 150.0)
         self.pages = cfg.i("scanner.pumpfun_pages", 2)
+        # GeckoTerminal rate-limits by IP on a monthly quota, and the bot was
+        # spending it: a 20s cache on a ~35s tick means every tick is a fresh
+        # call, which is 3 calls/minute for a pool list that barely changes and
+        # ~10k calls/month — the whole free tier. The list is a 24-hour ranking;
+        # 90s is still fresher than the number it is ranking.
+        self.discovery_ttl = cfg.i("scanner.pumpfun_ttl_seconds", 90)
+        # The launch feed is the one place freshness matters, but a token stays
+        # snipeable for 8 minutes, so seeing the same snapshot for 45s still
+        # catches every launch with room to spare.
+        self.new_pool_ttl = cfg.i("sniper.feed_ttl_seconds", 45)
         self.source = "none"
         self._last_source: str | None = None
         self._sol_price: float | None = None
@@ -166,7 +176,7 @@ class PumpFunVenue(VenueAdapter):
                 payload = await fetch_json(
                     f"{GECKO_BASE}/networks/solana/dexes/pump-fun/pools",
                     params={"page": page},
-                    ttl=20,
+                    ttl=self.discovery_ttl,
                     retries=1,
                 )
             except HttpError:
@@ -190,7 +200,7 @@ class PumpFunVenue(VenueAdapter):
             payload = await fetch_json(
                 f"{GECKO_BASE}/networks/solana/new_pools",
                 params={"page": 1},
-                ttl=15,
+                ttl=self.new_pool_ttl,
                 retries=1,
             )
         except HttpError:

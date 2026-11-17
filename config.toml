@@ -54,6 +54,7 @@ min_fdv_usd = 8000
 max_fdv_usd = 250000
 max_candidates = 2            # per tick
 feed_limit = 20               # rows read from new_pools
+feed_ttl_seconds = 45         # same snapshot for 45s: a launch stays snipeable 8 min
 cooldown_minutes = 60         # do not re-snipe the same mint
 min_edge = 0.12               # below this the 3.5% round-trip cost eats it
 signal_ttl_seconds = 120
@@ -130,6 +131,11 @@ pumpfun_sol_price_fallback = 150.0
 # count as "graduated", so this relaxes that one filter for that one source —
 # otherwise the fallback yields ~1 candidate and the venue looks dead.
 pumpfun_fallback_allow_graduated = true
+# GeckoTerminal's free tier is ~10k calls/month and a 20s cache on a ~35s tick
+# spends it in about a day, which is what the 429 stalls were. The pool list is a
+# 24h ranking — 90s is still fresher than the number being ranked.
+pumpfun_ttl_seconds = 90
+pumpfun_pages = 2
 
 # 15-minute crypto markets are a different size of business: ~$1k of liquidity is
 # normal, and a 1c spread on a 50c contract is tight, not wide.
@@ -225,6 +231,13 @@ trail_giveback_pct = 0.30           # exit if it gives back 30% of the peak gain
 stop_loss_pct = 0.35
 take_profit_pct = 1.5
 max_hold_hours = 24
+# Measured on live4: four positions sat inside ±3% for thirteen hours while
+# equity did not move a cent, and because every slot was taken nothing new could
+# open. 24h is a fair limit for a market that may still resolve, so the slot is
+# reclaimed separately: no movement for 3h and the position is an occupied chair,
+# not a trade. 0 disables the rule.
+stagnant_exit_hours = 3.0
+stagnant_band_pct = 0.03
 # pump.fun: memecoins live and die in hours, so tighter everything
 stop_loss_pct_token = 0.25
 take_profit_pct_token = 1.0

@@ -447,6 +447,75 @@ class TestShippedConfig(unittest.TestCase):
             arm, 0.25, "a +35% arm leaves +10..25% winners locked in a full book"
         )
 
+    def test_a_stagnant_position_cannot_hold_a_slot_all_day(self):
+        # live4: 13 hours of frozen equity, 4 positions inside ±3%, nothing new
+        # could open because every slot was taken
+        hours = self.cfg.f("risk.stagnant_exit_hours", 0.0)
+        self.assertGreater(hours, 0.0, "without this rule a flat book never rotates")
+        self.assertLess(hours, self.cfg.f("risk.max_hold_hours", 24.0))
+
+    def test_the_discovery_cache_does_not_spend_the_monthly_quota(self):
+        # 20s on a 35s tick is ~10k calls/month — GeckoTerminal's whole free tier
+        self.assertGreaterEqual(self.cfg.i("scanner.pumpfun_ttl_seconds", 20), 60)
+
+
+class TestStagnantExit(unittest.TestCase):
+    """A slot held by a position that is not moving is a slot doing nothing."""
+
+    def _run(self, cfg, avg, last, age_hours):
+        brk = broker()
+        pos = Position(
+            key="polymarket:tok1", venue=Venue.POLYMARKET, token_id="tok1",
+            question="Q?", qty=100, avg_price=avg, last_price=last,
+            high_water=max(avg, last),
+            opened_at=utcnow() - timedelta(hours=age_hours),
+        )
+        brk.positions[pos.key] = pos
+        agent = RiskAgent(cfg)
+        ctx = context(cfg, brk)
+        ctx.markets = [market(price=last, bid=last - 0.01, ask=last + 0.01)]
+        asyncio.run(agent.run(ctx))
+        return ctx
+
+    def test_flat_position_is_cut_and_frees_the_slot(self):
+        cfg = Config({"risk": {"stagnant_exit_hours": 3.0,
+                               "stagnant_band_pct": 0.03, "max_hold_hours": 24.0}})
+        ctx = self._run(cfg, avg=0.50, last=0.51, age_hours=5.0)
+        self.assertEqual(len(ctx.orders), 1)
+        self.assertIs(ctx.orders[0].side, Side.SELL)
+        self.assertIn("stagnant", ctx.orders[0].reason)
+
+    def test_a_position_that_is_working_is_left_alone(self):
+        cfg = Config({"risk": {"stagnant_exit_hours": 3.0,
+                               "stagnant_band_pct": 0.03, "max_hold_hours": 24.0}})
+        ctx = self._run(cfg, avg=0.50, last=0.62, age_hours=5.0)
+        self.assertEqual(ctx.orders, [])
+
+    def test_the_clock_has_to_run_out_first(self):
+        cfg = Config({"risk": {"stagnant_exit_hours": 3.0,
+                               "stagnant_band_pct": 0.03, "max_hold_hours": 24.0}})
+        ctx = self._run(cfg, avg=0.50, last=0.51, age_hours=1.0)
+        self.assertEqual(ctx.orders, [])
+
+    def test_a_position_that_once_ran_is_not_called_stagnant(self):
+        # it had its move and gave it back — that is a trade, not a parked slot
+        cfg = Config({"risk": {"stagnant_exit_hours": 3.0,
+                               "stagnant_band_pct": 0.03, "max_hold_hours": 24.0,
+                               "trail_arm_pct": 0.35}})
+        brk = broker()
+        pos = Position(
+            key="polymarket:tok1", venue=Venue.POLYMARKET, token_id="tok1",
+            question="Q?", qty=100, avg_price=0.50, last_price=0.51,
+            high_water=0.60,
+            opened_at=utcnow() - timedelta(hours=5),
+        )
+        brk.positions[pos.key] = pos
+        agent = RiskAgent(cfg)
+        ctx = context(cfg, brk)
+        ctx.markets = [market(price=0.51, bid=0.50, ask=0.52)]
+        asyncio.run(agent.run(ctx))
+        self.assertFalse(any("stagnant" in o.reason for o in ctx.orders))
+
 
 if __name__ == "__main__":
     unittest.main()

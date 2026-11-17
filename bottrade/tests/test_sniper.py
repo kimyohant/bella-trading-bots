@@ -211,6 +211,45 @@ class TestNewPoolsFeed(unittest.TestCase):
         self.assertEqual([p.question for p in pools], ["OK"])
 
 
+class TestDiscoveryQuota(unittest.TestCase):
+    """Both GeckoTerminal calls are cached, and how long for is a config decision.
+
+    A 20s cache on a ~35s tick is a fresh call every tick: ~10k a month, which is
+    the entire free tier. The bot was living through 429 stalls because of it.
+    """
+
+    def _capture(self, cfg, call):
+        seen = {}
+
+        async def fake_fetch(url, **kwargs):
+            seen.update(kwargs)
+            seen["url"] = url
+            return {"data": [gecko_pool("AAA")]}
+
+        with patch("bottrade.venues.pumpfun.fetch_json", new=fake_fetch):
+            asyncio.run(call(PumpFunVenue(cfg)))
+        return seen
+
+    def test_the_launch_feed_ttl_comes_from_config(self):
+        seen = self._capture(
+            Config({"sniper": {"feed_ttl_seconds": 45}}),
+            lambda v: v.new_pools(limit=5),
+        )
+        self.assertEqual(seen["ttl"], 45)
+
+    def test_the_pool_list_ttl_comes_from_config(self):
+        seen = self._capture(
+            Config({"scanner": {"pumpfun_ttl_seconds": 90}}),
+            lambda v: v._gecko_pools(),
+        )
+        self.assertEqual(seen["ttl"], 90)
+
+    def test_the_shipped_cache_is_not_a_fresh_call_per_tick(self):
+        cfg = Config.load()
+        self.assertGreaterEqual(cfg.i("scanner.pumpfun_ttl_seconds", 20), 60)
+        self.assertGreaterEqual(cfg.i("sniper.feed_ttl_seconds", 15), 30)
+
+
 class TestLaunchGates(unittest.TestCase):
     """Each gate below is a shape that loses money if it is let through."""
 

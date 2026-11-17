@@ -125,6 +125,16 @@ class RiskAgent(Agent):
         )
         exit_seconds = self.f("exit_seconds_before_window", 120.0)
 
+        # A slot is only worth what the position in it is doing. Measured on a
+        # 19-hour run: four positions sat between ±3% for thirteen hours while
+        # equity did not move a cent, and because every slot was taken nothing
+        # new could open. `max_hold_hours` cannot catch this — 24h is a fair
+        # limit for a binary market that might still resolve — so this is the
+        # separate rule: no movement for this long and the position is not a
+        # trade any more, it is an occupied chair.
+        stagnant_hours = self.f("stagnant_exit_hours", 3.0)
+        stagnant_band = self.f("stagnant_band_pct", 0.03)
+
         orders: list[Order] = []
         by_key = ctx.market_by_key()
 
@@ -198,6 +208,13 @@ class RiskAgent(Agent):
                 reason = f"window-end {market.hours_to_resolution * 3600.0:.0f}s left"
             elif position.age_hours >= max_hold:
                 reason = f"max-hold {position.age_hours:.1f}h"
+            elif (
+                stagnant_hours > 0
+                and position.age_hours >= stagnant_hours
+                and abs(ret) < stagnant_band
+                and peak < stagnant_band
+            ):
+                reason = f"stagnant {position.age_hours:.1f}h ({ret * 100:+.1f}%)"
             else:
                 # only exit on thesis decay once the position has had time to work,
                 # and only if the thesis actually got *worse* than it was at entry
