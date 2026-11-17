@@ -255,14 +255,7 @@ class PumpFunVenue(VenueAdapter):
         except HttpError:
             return
         rows = payload if isinstance(payload, list) else []
-        fresh: dict[str, float] = {}
-        for pair in rows:
-            if not isinstance(pair, dict):
-                continue
-            mint = str((pair.get("baseToken") or {}).get("address") or "")
-            price = _num(pair.get("priceUsd"))
-            if mint and price > 0:
-                fresh[mint] = price
+        fresh = _deepest_pair(rows)
         if not fresh:
             return
 
@@ -536,13 +529,8 @@ class PumpFunVenue(VenueAdapter):
             return {}
 
         out: dict[str, float] = {}
-        for pair in pairs:
-            if not isinstance(pair, dict):
-                continue
-            mint = str((pair.get("baseToken") or {}).get("address") or "")
-            price = _num(pair.get("priceUsd"))
-            if mint and price > 0:
-                out[f"{self.venue.value}:{mint}"] = price
+        for mint, price in _deepest_pair(pairs).items():
+            out[f"{self.venue.value}:{mint}"] = price
         return out
 
     async def get_quote(self, market: Market) -> Quote:
@@ -582,6 +570,29 @@ class PumpFunVenue(VenueAdapter):
             pass
         self._sol_price = self.sol_fallback
         return self._sol_price
+
+
+def _deepest_pair(pairs: Any) -> dict[str, float]:
+    """One price per mint, taken from the pool that actually holds the money.
+
+    A mint trades in several pools at once: a graduated token keeps its
+    zero-reserve `meteora-dbc` remnant listed next to the live `pumpswap`
+    market, and DexScreener returns both. Taking whichever came last priced a
+    token with $12,880 of reserve at 3.5e-12 — a -100% "stop-loss" on a position
+    that had not moved. Depth decides; the price is only read from the winner.
+    """
+    best: dict[str, tuple[float, float]] = {}
+    for pair in pairs if isinstance(pairs, list) else []:
+        if not isinstance(pair, dict):
+            continue
+        mint = str((pair.get("baseToken") or {}).get("address") or "")
+        price = _num(pair.get("priceUsd"))
+        if not mint or price <= 0:
+            continue
+        depth = _num((pair.get("liquidity") or {}).get("usd"))
+        if mint not in best or depth > best[mint][0]:
+            best[mint] = (depth, price)
+    return {mint: price for mint, (_, price) in best.items()}
 
 
 def _num(value: Any, default: float = 0.0) -> float:

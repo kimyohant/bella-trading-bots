@@ -302,6 +302,55 @@ class TestFreshMarks(unittest.TestCase):
         self.assertAlmostEqual(m.price, 1e-5)
 
 
+class TestMarkQuality(unittest.TestCase):
+    """A mint trades in several pools; only one of them is the market.
+
+    Live: `Turkey` had $12,880 of reserve on pumpswap and a zero-reserve
+    meteora-dbc remnant. The bot took the remnant's price (3.5e-12) and
+    "stopped out" a position that had not moved for the full $15.
+    """
+
+    PAIRS = [
+        {"baseToken": {"address": "turkey"}, "priceUsd": "0.0000000000035705",
+         "liquidity": {"usd": 0.0}, "dexId": "meteoradbc"},
+        {"baseToken": {"address": "turkey"}, "priceUsd": "0.00003431251276",
+         "liquidity": {"usd": 12880.0}, "dexId": "pumpswap"},
+    ]
+
+    def _venue(self):
+        return PumpFunVenue(Config({"scanner": {"pumpfun_spread_bps": 200}}))
+
+    def _quote(self, pairs):
+        async def fake_fetch(url, **kwargs):
+            return pairs
+
+        with patch("bottrade.venues.pumpfun.fetch_json", new=fake_fetch):
+            return asyncio.run(self._venue().quote_missing(["pumpfun:turkey"]))
+
+    def test_the_deepest_pool_sets_the_price(self):
+        self.assertAlmostEqual(
+            self._quote(self.PAIRS)["pumpfun:turkey"], 0.00003431251276
+        )
+
+    def test_order_in_the_response_does_not_matter(self):
+        self.assertAlmostEqual(
+            self._quote(list(reversed(self.PAIRS)))["pumpfun:turkey"],
+            0.00003431251276,
+        )
+
+    def test_the_price_refresh_uses_the_same_rule(self):
+        venue = self._venue()
+        m = launch("Turkey", price=1e-5, token="turkey")
+
+        async def fake_fetch(url, **kwargs):
+            return self.PAIRS
+
+        with patch("bottrade.venues.pumpfun.fetch_json", new=fake_fetch):
+            asyncio.run(venue._refresh_prices([m]))
+
+        self.assertAlmostEqual(m.price, 0.00003431251276)
+
+
 class TestLaunchGates(unittest.TestCase):
     """Each gate below is a shape that loses money if it is let through."""
 
