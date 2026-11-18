@@ -71,8 +71,10 @@ def build_snapshot(db_path: str | Path, cfg: Config | None = None,
         return empty
 
     try:
-        equity_rows = _rows(conn, "SELECT ts, equity, cash, exposure, realized_pnl, "
-                                  "unrealized_pnl FROM equity ORDER BY id")
+        equity_rows = _latest_run(
+            _rows(conn, "SELECT tick_no, ts, equity, cash, exposure, realized_pnl, "
+                        "unrealized_pnl FROM ticks ORDER BY id")
+        )
         tick_row = _one(conn, "SELECT * FROM ticks ORDER BY id DESC LIMIT 1")
         tick_no = int(tick_row["tick_no"]) if tick_row else 0
         n_open = int(tick_row["open_positions"] or 0) if tick_row else 0
@@ -245,6 +247,22 @@ def _signal(row: dict[str, Any]) -> dict[str, Any]:
     except (ValueError, TypeError):
         out["reasons"] = []
     return out
+
+
+def _latest_run(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The rows of the current run only.
+
+    `tick_no` restarts at 1 in every new process, so a decrease is the only
+    signal that a run ended — there is no run id, and adding one would mean a
+    schema migration for a display detail. Without this the dashboard drew one
+    line through every run in the file: start equity was the first run's, and
+    the curve jumped back to $1,000 mid-chart at each restart.
+    """
+    start = 0
+    for index in range(1, len(rows)):
+        if int(rows[index]["tick_no"] or 0) < int(rows[index - 1]["tick_no"] or 0):
+            start = index
+    return rows[start:]
 
 
 def _downsample(rows: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:

@@ -105,6 +105,13 @@ async def fetch_json(
                 pause = max(exc.retry_after or 0.0, _MIN_COOLDOWN)
                 _cooldown[host] = time.monotonic() + pause
                 raise
+            if 400 <= exc.status < 500 and exc.status not in (408, 429):
+                # A 404/410/403 is an answer, not a hiccup: the endpoint is gone,
+                # the path is wrong, or we are not allowed. Retrying it cannot
+                # change the outcome, and the sleeps add up — a retired tape
+                # endpoint cost 1.8s of every tick while it silently returned
+                # nothing. Fail once, and let the caller degrade.
+                raise
             if attempt < retries:
                 await asyncio.sleep(0.6 * (attempt + 1))
         except Exception as exc:  # noqa: BLE001 - we surface it after retries

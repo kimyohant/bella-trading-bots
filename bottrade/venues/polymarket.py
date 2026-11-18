@@ -384,18 +384,26 @@ class PolymarketVenue(VenueAdapter):
 
     # ------------------------------------------------------------------- tape
     async def recent_trades(self) -> list[dict[str, Any]]:
+        """The public trade tape — v2, because v1 was retired (HTTP 410).
+
+        The dead endpoint did not fail loudly: `recent_trades` degrades to an
+        empty list by design, so the whale agent simply had no Polymarket flow
+        for every tick, and the retry-on-4xx spent ~2.3s per tick finding out.
+        v2 wraps the rows in `{"data": [...], "pagination": {...}}` and uses
+        snake_case field names.
+        """
         limit = self.cfg.i("whale.lookback_trades", 150)
         try:
             raw = await fetch_json(
-                f"{DATA_BASE}/trades",
+                f"{DATA_BASE}/v2/trades",
                 params={"limit": min(limit, 500), "takerOnly": "true"},
                 ttl=15,
             )
         except HttpError:
             return []
         out: list[dict[str, Any]] = []
-        for trade in _as_objects(raw):
-            asset = str(trade.get("asset") or "")
+        for trade in _as_objects(raw.get("data") if isinstance(raw, dict) else raw):
+            asset = str(trade.get("token_id") or trade.get("asset") or "")
             if not asset:
                 continue
             size = _num(trade.get("size"), 0.0)
@@ -407,9 +415,11 @@ class PolymarketVenue(VenueAdapter):
                     "price": price,
                     "qty": size,
                     "notional": size * price,
-                    "wallet": str(trade.get("proxyWallet") or ""),
+                    "wallet": str(
+                        trade.get("proxy_wallet") or trade.get("proxyWallet") or ""
+                    ),
                     "ts": parse_ts(trade.get("timestamp")),
-                    "market": trade.get("conditionId") or "",
+                    "market": trade.get("condition_id") or trade.get("conditionId") or "",
                     "title": trade.get("title") or "",
                 }
             )
