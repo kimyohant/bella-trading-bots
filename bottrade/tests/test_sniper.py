@@ -268,7 +268,8 @@ class TestFreshMarks(unittest.TestCase):
 
         async def fake_fetch(url, **kwargs):
             self.assertIn("tokens/v1/solana/aaa", url)
-            return [{"baseToken": {"address": "aaa"}, "priceUsd": "0.00002"}]
+            return [{"baseToken": {"address": "aaa"}, "priceUsd": "0.00002",
+                     "liquidity": {"usd": 24000.0}, "fdv": 20000.0}]
 
         with patch("bottrade.venues.pumpfun.fetch_json", new=fake_fetch):
             asyncio.run(venue._refresh_prices([m]))
@@ -294,7 +295,8 @@ class TestFreshMarks(unittest.TestCase):
         m = launch("AAA", price=1e-5, token="aaa")
 
         async def fake_fetch(url, **kwargs):
-            return [{"baseToken": {"address": "zzz"}, "priceUsd": "9.0"}]
+            return [{"baseToken": {"address": "zzz"}, "priceUsd": "9.0",
+                     "liquidity": {"usd": 50000.0}, "fdv": 90000.0}]
 
         with patch("bottrade.venues.pumpfun.fetch_json", new=fake_fetch):
             asyncio.run(venue._refresh_prices([m]))
@@ -349,6 +351,38 @@ class TestMarkQuality(unittest.TestCase):
             asyncio.run(venue._refresh_prices([m]))
 
         self.assertAlmostEqual(m.price, 0.00003431251276)
+
+    # What DexScreener actually returns for a graduated launch whose new pool is
+    # not indexed yet: the dead meteora-dbc curve, and nothing else. Live, four
+    # sniper tickets were "stopped out" at -100% this way, 25-37s after entry.
+    REMNANT_ONLY = [
+        {"baseToken": {"address": "bawsaw"}, "priceUsd": "0.000000000003610",
+         "liquidity": {"usd": None}, "dexId": "meteoradbc"},
+    ]
+
+    def test_a_pool_with_no_depth_and_no_fdv_is_not_a_price(self):
+        self.assertEqual(self._quote(self.REMNANT_ONLY), {})
+
+    def test_a_dead_curve_loses_a_tie_on_depth(self):
+        pairs = [
+            {"baseToken": {"address": "gib"}, "priceUsd": "0.00000000003286",
+             "liquidity": {"usd": 0.0}, "fdv": 0.03, "dexId": "meteoradbc"},
+            {"baseToken": {"address": "gib"}, "priceUsd": "0.00001367",
+             "liquidity": {"usd": 0.0}, "fdv": 13676.0, "dexId": "pumpswap"},
+        ]
+        self.assertAlmostEqual(self._quote(pairs)["pumpfun:gib"], 0.00001367)
+
+    def test_an_unpriced_mint_keeps_its_last_good_mark(self):
+        venue = self._venue()
+        m = launch("BAWSAQ", price=2.9e-5, token="bawsaw")
+
+        async def fake_fetch(url, **kwargs):
+            return self.REMNANT_ONLY
+
+        with patch("bottrade.venues.pumpfun.fetch_json", new=fake_fetch):
+            asyncio.run(venue._refresh_prices([m]))
+
+        self.assertAlmostEqual(m.price, 2.9e-5)
 
 
 class TestLaunchGates(unittest.TestCase):

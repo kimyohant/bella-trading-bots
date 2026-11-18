@@ -572,16 +572,27 @@ class PumpFunVenue(VenueAdapter):
         return self._sol_price
 
 
+_MIN_POOL_FDV = 1_000.0
+
+
 def _deepest_pair(pairs: Any) -> dict[str, float]:
-    """One price per mint, taken from the pool that actually holds the money.
+    """One price per mint, taken from a pool that is actually a market.
 
     A mint trades in several pools at once: a graduated token keeps its
     zero-reserve `meteora-dbc` remnant listed next to the live `pumpswap`
     market, and DexScreener returns both. Taking whichever came last priced a
     token with $12,880 of reserve at 3.5e-12 — a -100% "stop-loss" on a position
     that had not moved. Depth decides; the price is only read from the winner.
+
+    Depth alone is not enough, though, because DexScreener reports no liquidity
+    at all for most pump.fun pools: the remnant and the real market both come
+    back at zero, the tie goes to whichever arrived first, and it is usually the
+    remnant. So the tie is broken by fully-diluted value, and a pool that has
+    neither depth nor a plausible FDV is not a price — it is an abandoned curve.
+    Returning nothing is the right answer there: the caller then leaves the last
+    good mark alone instead of marking a live position to zero.
     """
-    best: dict[str, tuple[float, float]] = {}
+    best: dict[str, tuple[float, float, float]] = {}
     for pair in pairs if isinstance(pairs, list) else []:
         if not isinstance(pair, dict):
             continue
@@ -590,9 +601,14 @@ def _deepest_pair(pairs: Any) -> dict[str, float]:
         if not mint or price <= 0:
             continue
         depth = _num((pair.get("liquidity") or {}).get("usd"))
-        if mint not in best or depth > best[mint][0]:
-            best[mint] = (depth, price)
-    return {mint: price for mint, (_, price) in best.items()}
+        fdv = _num(pair.get("fdv"))
+        if mint not in best or (depth, fdv) > best[mint][:2]:
+            best[mint] = (depth, fdv, price)
+    return {
+        mint: price
+        for mint, (depth, fdv, price) in best.items()
+        if depth > 0 or fdv >= _MIN_POOL_FDV
+    }
 
 
 def _num(value: Any, default: float = 0.0) -> float:
